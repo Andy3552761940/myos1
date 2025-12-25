@@ -13,6 +13,10 @@ typedef enum {
     THREAD_ZOMBIE,
 } thread_state_t;
 
+typedef struct vfs_file vfs_file_t;
+
+#define THREAD_MAX_OPEN_FILES 8
+
 typedef struct thread {
     uint64_t id;
     char     name[16];
@@ -50,8 +54,11 @@ typedef struct thread {
     uint64_t brk_end;
 
     /* Very small and simplistic file table placeholder. */
-    int      open_files[8];
-    size_t   open_file_count;
+    vfs_file_t* open_files[THREAD_MAX_OPEN_FILES];
+    size_t      open_file_count;
+
+    /* Simple mmap base for anonymous mappings. */
+    uint64_t mmap_base;
 
     uint64_t wakeup_tick;
 

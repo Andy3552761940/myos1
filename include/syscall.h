@@ -19,5 +19,17 @@
 #define SYS_listen 15
 #define SYS_accept 16
 #define SYS_close 17
+#define SYS_open 18
+#define SYS_read 19
+#define SYS_lseek 20
+#define SYS_getpid 21
+#define SYS_uname 22
+#define SYS_sysinfo 23
+#define SYS_mmap 24
+#define SYS_kill 25
+
+#define SYS_SEEK_SET 0
+#define SYS_SEEK_CUR 1
+#define SYS_SEEK_END 2
 
 intr_frame_t* syscall_handle(intr_frame_t* frame);

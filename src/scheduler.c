@@ -3,6 +3,8 @@
 #include "console.h"
 #include "lib.h"
 #include "vmm.h"
+#include "vfs.h"
+#include "kmalloc.h"
 #include "arch/x86_64/common.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/pit.h"
@@ -205,6 +207,36 @@ static void thread_release_resources(thread_t* t) {
     }
 }
 
+static void thread_mark_zombie(thread_t* t, int exit_code) {
+    if (!t) return;
+    t->exit_code = exit_code;
+    t->state = THREAD_ZOMBIE;
+
+    if (t->parent) {
+        if (t->parent->children > 0) t->parent->children--;
+        /* Wake a waiting parent if it waits for us or for any child (pid<=0). */
+        if (t->parent->state == THREAD_BLOCKED &&
+            (t->parent->wait_target <= 0 || t->parent->wait_target == (int)t->id)) {
+            if (t->parent->wait_status_ptr) {
+                int* sp = (int*)(uintptr_t)t->parent->wait_status_ptr;
+                *sp = t->exit_code;
+            }
+            t->parent->wait_target = 0;
+            t->parent->wait_status_ptr = 0;
+            t->parent->state = THREAD_READY;
+        }
+    }
+}
+
+static thread_t* find_thread_by_id(int pid) {
+    for (size_t i = 0; i < MAX_THREADS; i++) {
+        thread_t* t = &g_threads[i];
+        if (t->state == THREAD_UNUSED) continue;
+        if ((int)t->id == pid) return t;
+    }
+    return 0;
+}
+
 static intr_frame_t* do_switch(intr_frame_t* frame, thread_t* next) {
     if (next == g_current) return frame;
 
@@ -261,6 +293,27 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
     child->ustack_top = parent->ustack_top;
     child->brk_start = parent->brk_start;
     child->brk_end = parent->brk_end;
+    child->mmap_base = parent->mmap_base;
+
+    for (size_t i = 0; i < THREAD_MAX_OPEN_FILES; i++) {
+        if (!parent->open_files[i]) continue;
+        vfs_file_t* dup = (vfs_file_t*)kmalloc(sizeof(vfs_file_t));
+        if (!dup) {
+            for (size_t j = 0; j < THREAD_MAX_OPEN_FILES; j++) {
+                if (child->open_files[j]) {
+                    vfs_close(child->open_files[j]);
+                    child->open_files[j] = 0;
+                }
+            }
+            child->open_file_count = 0;
+            child->state = THREAD_UNUSED;
+            frame->rax = (uint64_t)-1;
+            return frame;
+        }
+        *dup = *parent->open_files[i];
+        child->open_files[i] = dup;
+        child->open_file_count++;
+    }
 
     child->kstack_size = parent->kstack_size;
     child->kstack = (uint8_t*)pmm_alloc_pages(child->kstack_size / PAGE_SIZE);
@@ -294,23 +347,7 @@ intr_frame_t* scheduler_on_exit(intr_frame_t* frame, int exit_code) {
     console_write(" exited\n");
 
     cur->rsp = (uint64_t)(uintptr_t)frame;
-    cur->exit_code = exit_code;
-    cur->state = THREAD_ZOMBIE;
-
-    if (cur->parent) {
-        if (cur->parent->children > 0) cur->parent->children--;
-        /* Wake a waiting parent if it waits for us or for any child (pid<=0). */
-        if (cur->parent->state == THREAD_BLOCKED &&
-            (cur->parent->wait_target <= 0 || cur->parent->wait_target == (int)cur->id)) {
-            if (cur->parent->wait_status_ptr) {
-                int* sp = (int*)(uintptr_t)cur->parent->wait_status_ptr;
-                *sp = cur->exit_code;
-            }
-            cur->parent->wait_target = 0;
-            cur->parent->wait_status_ptr = 0;
-            cur->parent->state = THREAD_READY;
-        }
-    }
+    thread_mark_zombie(cur, exit_code);
 
     /* Pick next READY thread; if none, fall back to bootstrap (should be READY/RUNNING). */
     thread_t* next = pick_next();
@@ -333,6 +370,23 @@ void scheduler_sleep(uint64_t ticks) {
     cur->state = THREAD_SLEEPING;
     /* Force a yield via int 0x80 SYS_yield (works in ring0 too). */
     __asm__ volatile ("movq $3, %%rax; int $0x80" : : : "rax", "memory");
+}
+
+int scheduler_kill(int pid, int sig) {
+    thread_t* target = find_thread_by_id(pid);
+    if (!target || !target->is_user) return -1;
+    if (target == g_current) return 0;
+    if (target->state == THREAD_ZOMBIE) return 0;
+    thread_mark_zombie(target, -sig);
+    return 0;
+}
+
+uint64_t scheduler_thread_count(void) {
+    uint64_t count = 0;
+    for (size_t i = 0; i < MAX_THREADS; i++) {
+        if (g_threads[i].state != THREAD_UNUSED) count++;
+    }
+    return count;
 }
 
 static thread_t* find_child(thread_t* parent, int pid, bool require_zombie) {
@@ -358,6 +412,13 @@ intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_pt
             *sp = zombie->exit_code;
         }
         thread_release_resources(zombie);
+        for (size_t i = 0; i < THREAD_MAX_OPEN_FILES; i++) {
+            if (zombie->open_files[i]) {
+                vfs_close(zombie->open_files[i]);
+                zombie->open_files[i] = 0;
+            }
+        }
+        zombie->open_file_count = 0;
         zombie->state = THREAD_UNUSED;
         frame->rax = zombie->id;
         return frame;
@@ -469,10 +530,10 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_s
 
     t->brk_start = brk_start;
     t->brk_end = brk_start;
+    t->mmap_base = align_up_u64(brk_start, PAGE_SIZE) + 0x01000000ULL;
 
     build_user_thread_frame(t, user_rip);
 
     t->state = THREAD_READY;
     return t;
 }
-

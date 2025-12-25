@@ -27,8 +27,14 @@ intr_frame_t* scheduler_yield(intr_frame_t* frame);
 /* Wait for a child process to exit (invoked by syscall waitpid). */
 intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_ptr);
 
+/* Send a signal to a user thread (simple kill). */
+int scheduler_kill(int pid, int sig);
+
 /* Sleep current thread for n ticks (called from kernel code only). */
 void scheduler_sleep(uint64_t ticks);
+
+/* Count active threads (non-unused). */
+uint64_t scheduler_thread_count(void);
 
 /* Print scheduler status. */
 void scheduler_dump(void);
