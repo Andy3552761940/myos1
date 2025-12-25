@@ -169,33 +169,6 @@ isr128:
 .section .rodata
 .global isr_stub_table
 isr_stub_table:
-    /* 0-31 exceptions */
-.altmacro
-.set i, 0
-.rept 32
-    .quad isr%i
-.set i, i+1
-.endr
-    /* 32-47 IRQs */
-.set i, 0
-.rept 16
-    .quad irq%i
-.set i, i+1
-.endr
-    /* 48-127 generic */
-.set i, 48
-.rept 80
-    .quad isr%i
-.set i, i+1
-.endr
-    /* 128 syscall */
-    .quad isr128
-    /* 129-255 generic */
-.set i, 129
-.rept 127
-    .quad isr%i
-.set i, i+1
-.endr
-.noaltmacro
+    .include "src/arch/x86_64/isr_stub_table.inc"
 
 .section .note.GNU-stack,"",@progbits

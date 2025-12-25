@@ -1,6 +1,6 @@
 #include "console.h"
-#include "io.h"
 #include "lib.h"
+#include "serial.h"
 
 #define VGA_TEXT_MODE_BASE ((volatile uint16_t*)0xB8000)
 #define VGA_WIDTH  80
@@ -10,32 +10,10 @@ static uint8_t cursor_x = 0;
 static uint8_t cursor_y = 0;
 static uint8_t vga_color = 0x0F; /* white on black */
 
-static int serial_inited = 0;
+static int serial_enabled = 1;
 
 static console_fb_info_t fb_info;
 static int fb_enabled = 0;
-
-static void serial_init(void) {
-    /* COM1 base 0x3F8 */
-    outb(0x3F8 + 1, 0x00);    // Disable all interrupts
-    outb(0x3F8 + 3, 0x80);    // Enable DLAB (set baud rate divisor)
-    outb(0x3F8 + 0, 0x03);    // Set divisor to 3 (lo byte) 38400 baud
-    outb(0x3F8 + 1, 0x00);    //                  (hi byte)
-    outb(0x3F8 + 3, 0x03);    // 8 bits, no parity, one stop bit
-    outb(0x3F8 + 2, 0xC7);    // Enable FIFO, clear them, with 14-byte threshold
-    outb(0x3F8 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
-    serial_inited = 1;
-}
-
-static int serial_can_tx(void) {
-    return inb(0x3F8 + 5) & 0x20;
-}
-
-static void serial_putc(char c) {
-    if (!serial_inited) return;
-    while (!serial_can_tx()) { }
-    outb(0x3F8, (uint8_t)c);
-}
 
 static void vga_put_entry_at(char c, uint8_t color, uint8_t x, uint8_t y) {
     const size_t index = (size_t)y * VGA_WIDTH + x;
@@ -98,9 +76,15 @@ void console_set_framebuffer(const console_fb_info_t* info) {
     fb_enabled = 1;
 }
 
-void console_putc(char c) {
-    serial_putc(c);
+void console_set_serial_enabled(int enabled) {
+    serial_enabled = (enabled != 0);
+}
 
+int console_get_serial_enabled(void) {
+    return serial_enabled;
+}
+
+void console_putc_vga(char c) {
     if (c == '\n') {
         vga_newline();
         return;
@@ -118,6 +102,15 @@ void console_putc(char c) {
     if (cursor_x >= VGA_WIDTH) {
         vga_newline();
     }
+}
+
+void console_putc(char c) {
+    if (serial_enabled) serial_putc(c);
+    console_putc_vga(c);
+}
+
+void console_write_vga(const char* s) {
+    for (size_t i = 0; s[i]; i++) console_putc_vga(s[i]);
 }
 
 void console_write(const char* s) {

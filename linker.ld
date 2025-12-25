@@ -10,6 +10,11 @@ PHDRS
 
 SECTIONS
 {
+    . = 0x7000;
+    .ap_trampoline : ALIGN(16) {
+        *(.ap_trampoline*)
+    } :text
+
     . = 1M;
     _kernel_start = .;
 

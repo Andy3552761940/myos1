@@ -32,6 +32,9 @@ KERNEL_SRCS := \
     src/boot.S \
     src/kernel.c \
     src/console.c \
+    src/serial.c \
+    src/log.c \
+    src/gdb.c \
     src/lib.c \
     src/pmm.c \
     src/vmm.c \

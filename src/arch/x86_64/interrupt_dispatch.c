@@ -5,6 +5,7 @@
 #include "arch/x86_64/pit.h"
 #include "arch/x86_64/apic.h"
 #include "console.h"
+#include "gdb.h"
 #include "scheduler.h"
 #include "thread.h"
 #include "syscall.h"
@@ -131,6 +132,13 @@ intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
     /* Syscall */
     if (n == 0x80) {
         return syscall_handle(frame);
+    }
+
+    if (n == 1 || n == 3) {
+        intr_frame_t* out = frame;
+        if (gdb_handle_exception(frame, &out)) {
+            return out;
+        }
     }
 
     /* CPU exception */

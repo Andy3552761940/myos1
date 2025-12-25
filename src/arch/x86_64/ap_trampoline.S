@@ -1,4 +1,4 @@
-.section .text
+.section .ap_trampoline, "ax"
 .code16
 .global ap_trampoline_start
 .global ap_trampoline_end

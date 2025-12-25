@@ -5,6 +5,9 @@
 #define MP_FLOATING_SIGNATURE 0x5F504D5FUL /* _MP_ */
 #define MP_CONFIG_SIGNATURE   0x504D4350UL /* PCMP */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+
 typedef struct {
     uint32_t signature;
     uint32_t config_table;
@@ -58,15 +61,22 @@ static const mp_floating_t* mp_scan_range(uintptr_t start, size_t len) {
     return 0;
 }
 
+static uint16_t bda_read_u16(uint16_t offset) {
+    volatile const uint16_t* p = (volatile const uint16_t*)(uintptr_t)(0x400u + offset);
+    return *p;
+}
+
+#pragma GCC diagnostic pop
+
 static const mp_floating_t* mp_find_floating(void) {
-    uint16_t ebda_seg = *(uint16_t*)(uintptr_t)0x40E;
+    uint16_t ebda_seg = bda_read_u16(0x0E);
     uintptr_t ebda = (uintptr_t)ebda_seg << 4;
     if (ebda) {
         const mp_floating_t* mp = mp_scan_range(ebda, 1024);
         if (mp) return mp;
     }
 
-    uint16_t base_kb = *(uint16_t*)(uintptr_t)0x413;
+    uint16_t base_kb = bda_read_u16(0x13);
     uintptr_t base = ((uintptr_t)base_kb << 10) - 1024;
     if (base) {
         const mp_floating_t* mp = mp_scan_range(base, 1024);

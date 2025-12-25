@@ -24,6 +24,8 @@
 #include "arch/x86_64/common.h"
 #include "scheduler.h"
 #include "thread.h"
+#include "log.h"
+#include "gdb.h"
 
 #define MB2_BOOTLOADER_MAGIC 0x36d76289u
 
@@ -34,11 +36,9 @@ static void klogger(void* arg) {
     (void)arg;
     for (;;) {
         scheduler_sleep(100); /* ~1 second at 100Hz */
-        console_write("[klogger] ticks=");
-        console_write_dec_u64(pit_ticks());
-        console_write(" free_mem=");
-        console_write_dec_u64(pmm_free_memory_bytes() / 1024);
-        console_write(" KiB\n");
+        log_info("ticks=%llu free_mem=%llu KiB\n",
+                 (unsigned long long)pit_ticks(),
+                 (unsigned long long)(pmm_free_memory_bytes() / 1024));
     }
 }
 
@@ -46,15 +46,11 @@ static void pci_cb(const pci_dev_t* dev, void* user) {
     (void)user;
     net_pci_probe(dev);
     if (dev->vendor_id == 0x1AF4) {
-        console_write("[pci] virtio dev ");
-        console_write_hex32(dev->device_id);
-        console_write(" at ");
-        console_write_dec_u64(dev->bus);
-        console_write(":");
-        console_write_dec_u64(dev->slot);
-        console_write(".");
-        console_write_dec_u64(dev->func);
-        console_write("\n");
+        log_info("virtio dev 0x%08x at %llu:%llu.%llu\n",
+                 dev->device_id,
+                 (unsigned long long)dev->bus,
+                 (unsigned long long)dev->slot,
+                 (unsigned long long)dev->func);
 
         virtio_blk_try_init_legacy(dev->bus, dev->slot, dev->func);
     }
@@ -62,15 +58,15 @@ static void pci_cb(const pci_dev_t* dev, void* user) {
 
 void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
     console_init();
+    log_init(LOG_LEVEL_INFO, LOG_TARGET_CONSOLE | LOG_TARGET_SERIAL);
+    gdb_init();
 
-    console_write("[kernel] mb2_magic=");
-    console_write_hex64(mb2_magic);
-    console_write(" mb2=");
-    console_write_hex64((uint64_t)(uintptr_t)mb2);
-    console_write("\n");
+    log_info("mb2_magic=0x%llx mb2=0x%llx\n",
+             (unsigned long long)mb2_magic,
+             (unsigned long long)(uintptr_t)mb2);
 
     if ((uint32_t)mb2_magic != MB2_BOOTLOADER_MAGIC) {
-        console_write("[kernel] ERROR: bad multiboot2 magic\n");
+        log_error("bad multiboot2 magic\n");
         for (;;) cpu_hlt();
     }
 
@@ -88,7 +84,7 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
                 .type = fb->framebuffer_type,
             };
             console_set_framebuffer(&info);
-            console_write("[console] framebuffer enabled\n");
+            log_info("framebuffer enabled\n");
             break;
         }
         tag = (const mb2_tag_t*)((const uint8_t*)tag + mb2_align8(tag->size));
@@ -139,7 +135,7 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
     /* Load and run init.elf from initramfs in user mode (reserve its memory early). */
     vfs_file_t* init_file = vfs_open("/init.elf", VFS_O_RDONLY);
     if (!init_file || !init_file->node) {
-        console_write("[kernel] ERROR: init.elf not found in initramfs\n");
+        log_error("init.elf not found in initramfs\n");
     } else {
         size_t init_size = init_file->node->size;
         uint8_t* init_data = 0;
@@ -147,11 +143,11 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
             init_data = (uint8_t*)kmalloc(init_size);
         }
         if (!init_data && init_size > 0) {
-            console_write("[kernel] ERROR: failed to allocate init buffer\n");
+            log_error("failed to allocate init buffer\n");
         } else if (init_size > 0) {
             vfs_ssize_t nread = vfs_read(init_file, init_data, init_size);
             if (nread < 0 || (size_t)nread != init_size) {
-                console_write("[kernel] ERROR: failed to read init.elf\n");
+                log_error("failed to read init.elf\n");
                 kfree(init_data);
                 init_data = 0;
                 init_size = 0;
@@ -163,7 +159,7 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
         if (init_data && init_cr3 && elf64_load_image(init_data, init_size, init_cr3, &entry, &brk)) {
             thread_create_user("init", entry, brk, init_cr3);
         } else {
-            console_write("[kernel] ERROR: failed to load init.elf\n");
+            log_error("failed to load init.elf\n");
         }
         if (init_data) kfree(init_data);
         vfs_close(init_file);
@@ -179,7 +175,7 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
     uint8_t sector0[512];
     memset(sector0, 0, sizeof(sector0));
     if (virtio_blk_read_sector(0, sector0)) {
-        console_write("[virtio-blk] sector0[0..31]: ");
+        log_info("virtio-blk sector0[0..31]: ");
         for (int i = 0; i < 32; i++) {
             static const char* hex = "0123456789ABCDEF";
             uint8_t b = sector0[i];
@@ -187,17 +183,17 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
             console_putc(hex[b & 0xF]);
             console_putc(' ');
         }
-        console_write("\n");
+        console_putc('\n');
     } else {
-        console_write("[virtio-blk] read sector0 skipped/failed\n");
+        log_warn("virtio-blk read sector0 skipped/failed\n");
     }
 
     scheduler_dump();
 
-    console_write("[kernel] enabling interrupts\n");
+    log_info("enabling interrupts\n");
     cpu_sti();
 
-    console_write("[kernel] idle loop\n");
+    log_info("idle loop\n");
     for (;;) {
         cpu_hlt();
     }
