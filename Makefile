@@ -36,6 +36,9 @@ KERNEL_SRCS := \
     src/pmm.c \
     src/vmm.c \
     src/kmalloc.c \
+	src/vfs.c \
+    src/memfs.c \
+    src/devfs.c \
     src/tarfs.c \
     src/elf.c \
     src/pci.c \
