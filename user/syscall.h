@@ -31,6 +31,10 @@ static inline int64_t sys_write(int64_t fd, const void* buf, int64_t len) {
     return sys_call3(1, fd, (int64_t)(uintptr_t)buf, len);
 }
 
+static inline int64_t sys_brk(void* end) {
+    return sys_call1(4, (int64_t)(uintptr_t)end);
+}
+
 static inline void sys_exit(int64_t code) {
     sys_call1(2, code);
     for (;;) { __asm__ volatile("hlt"); }

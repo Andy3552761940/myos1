@@ -6,6 +6,8 @@
 #include "elf.h"
 #include "pci.h"
 #include "virtio_blk.h"
+#include "vmm.h"
+#include "kmalloc.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/pic.h"
@@ -65,6 +67,10 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
     /* Memory manager (identity mapped 0..4GiB). */
     pmm_init(mb2);
 
+    /* Virtual memory + kernel heap. */
+    vmm_init();
+    kmalloc_init();
+
     /* CPU tables */
     gdt_init();
     idt_init();
@@ -90,8 +96,10 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
         console_write("[kernel] ERROR: init.elf not found in initramfs\n");
     } else {
         uint64_t entry = 0;
-        if (elf64_load_image(init_data, init_size, &entry)) {
-            thread_create_user("init", entry);
+        uint64_t brk = 0;
+        uint64_t init_cr3 = vmm_create_user_space();
+        if (init_cr3 && elf64_load_image(init_data, init_size, init_cr3, &entry, &brk)) {
+            thread_create_user("init", entry, brk, init_cr3);
         } else {
             console_write("[kernel] ERROR: failed to load init.elf\n");
         }

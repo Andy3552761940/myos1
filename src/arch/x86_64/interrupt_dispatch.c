@@ -110,6 +110,15 @@ intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
         uint64_t cr2 = read_cr2();
         console_write(" CR2=");
         console_write_hex64(cr2);
+        console_write(" err=");
+        console_write_hex64(frame->err_code);
+        console_write(" [P=");
+        console_write_dec_u64(frame->err_code & 1);
+        console_write(" W=");
+        console_write_dec_u64((frame->err_code >> 1) & 1);
+        console_write(" U=");
+        console_write_dec_u64((frame->err_code >> 2) & 1);
+        console_write("]");
         console_write("\n");
     }
 

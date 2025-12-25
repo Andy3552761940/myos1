@@ -1,0 +1,9 @@
+build/
+*.o
+*.elf
+*.bin
+*.img
+*.iso
+*.map
+*.lst
+*.zip

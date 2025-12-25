@@ -3,6 +3,7 @@
 #include "scheduler.h"
 #include "thread.h"
 #include "lib.h"
+#include "vmm.h"
 
 intr_frame_t* syscall_handle(intr_frame_t* frame) {
     uint64_t num = frame->rax;
@@ -34,6 +35,26 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
         }
         case SYS_yield: {
             return scheduler_yield(frame);
+        }
+        case SYS_brk: {
+            thread_t* t = thread_current();
+            uint64_t new_end = frame->rdi;
+            if (!t || !t->is_user) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+
+            if (new_end == 0) {
+                frame->rax = t->brk_end;
+                return frame;
+            }
+
+            if (!vmm_user_set_brk(t, new_end)) {
+                frame->rax = (uint64_t)-1;
+            } else {
+                frame->rax = t->brk_end;
+            }
+            return frame;
         }
         default:
             console_write("[syscall] unknown syscall ");

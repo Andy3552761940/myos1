@@ -32,6 +32,11 @@ typedef struct thread {
     /* User stack (only for user threads). */
     uint8_t* ustack;
     size_t   ustack_size;
+    uint64_t ustack_top;
+
+    /* User heap (brk). */
+    uint64_t brk_start;
+    uint64_t brk_end;
 
     uint64_t wakeup_tick;
 

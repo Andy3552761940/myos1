@@ -2,6 +2,7 @@
 #include "console.h"
 #include "lib.h"
 #include "pmm.h"
+#include "vmm.h"
 
 #define EI_NIDENT 16
 #define ELF_MAGIC0 0x7F
@@ -58,7 +59,7 @@ static bool elf_validate(const Elf64_Ehdr* eh, size_t size) {
     return true;
 }
 
-bool elf64_load_image(const uint8_t* image, size_t size, uint64_t* out_entry) {
+bool elf64_load_image(const uint8_t* image, size_t size, uint64_t target_cr3, uint64_t* out_entry, uint64_t* out_brk) {
     const Elf64_Ehdr* eh = (const Elf64_Ehdr*)image;
     if (!elf_validate(eh, size)) {
         console_write("[elf] invalid ELF image\n");
@@ -67,24 +68,9 @@ bool elf64_load_image(const uint8_t* image, size_t size, uint64_t* out_entry) {
 
     const Elf64_Phdr* ph = (const Elf64_Phdr*)(image + eh->e_phoff);
 
-    /* Reserve all PT_LOAD ranges first to avoid allocator conflicts. */
-    for (uint16_t i = 0; i < eh->e_phnum; i++) {
-        if (ph[i].p_type != PT_LOAD) continue;
+    uint64_t max_end = 0;
 
-        uint64_t vaddr = ph[i].p_vaddr;
-        uint64_t memsz = ph[i].p_memsz;
-        if (memsz == 0) continue;
-
-        /* This kernel uses identity mapping up to 4GiB. */
-        if (vaddr + memsz >= (4ULL * 1024 * 1024 * 1024)) {
-            console_write("[elf] segment outside identity map\n");
-            return false;
-        }
-
-        pmm_reserve_range(vaddr, memsz);
-    }
-
-    /* Copy segments. */
+    /* Map and copy segments. */
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type != PT_LOAD) continue;
 
@@ -98,18 +84,47 @@ bool elf64_load_image(const uint8_t* image, size_t size, uint64_t* out_entry) {
             return false;
         }
 
-        uint8_t* dst = (uint8_t*)(uintptr_t)vaddr;
-        const uint8_t* src = image + off;
+        uint64_t seg_start = align_down_u64(vaddr, PAGE_SIZE);
+        uint64_t seg_end = align_up_u64(vaddr + memsz, PAGE_SIZE);
+        uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
+        if (ph[i].p_flags & 0x2) flags |= VMM_FLAG_WRITABLE;
+        if ((ph[i].p_flags & 0x1) == 0) flags |= VMM_FLAG_NOEXEC;
 
-        if (filesz > 0) {
-            memcpy(dst, src, (size_t)filesz);
+        for (uint64_t va = seg_start; va < seg_end; va += PAGE_SIZE) {
+            uint64_t pa = pmm_alloc_pages(1);
+            if (!pa) {
+                console_write("[elf] out of memory mapping segment\n");
+                return false;
+            }
+            memset((void*)(uintptr_t)pa, 0, PAGE_SIZE);
+            if (!vmm_map_page(target_cr3, va, pa, flags)) {
+                pmm_free_pages(pa, 1);
+                console_write("[elf] map_page failed\n");
+                return false;
+            }
         }
-        if (memsz > filesz) {
-            memset(dst + filesz, 0, (size_t)(memsz - filesz));
+
+        const uint8_t* src = image + off;
+        uint64_t copied = 0;
+        while (copied < filesz) {
+            uint64_t cur_va = vaddr + copied;
+            uint64_t pa = 0;
+            if (!vmm_resolve(target_cr3, cur_va, &pa, 0)) {
+                console_write("[elf] resolve failed during copy\n");
+                return false;
+            }
+            size_t page_off = (size_t)(cur_va & (PAGE_SIZE - 1));
+            size_t to_copy = PAGE_SIZE - page_off;
+            if (to_copy > filesz - copied) to_copy = (size_t)(filesz - copied);
+            memcpy((void*)(uintptr_t)(pa + page_off), src + copied, to_copy);
+            copied += to_copy;
         }
+
+        if (vaddr + memsz > max_end) max_end = align_up_u64(vaddr + memsz, PAGE_SIZE);
     }
 
     *out_entry = eh->e_entry;
+    if (out_brk) *out_brk = max_end;
     console_write("[elf] loaded entry=");
     console_write_hex64(*out_entry);
     console_write("\n");

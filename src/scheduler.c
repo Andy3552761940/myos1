@@ -2,6 +2,7 @@
 #include "pmm.h"
 #include "console.h"
 #include "lib.h"
+#include "vmm.h"
 #include "arch/x86_64/common.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/pit.h"
@@ -68,7 +69,7 @@ static void build_user_thread_frame(thread_t* t, uint64_t user_rip) {
     uint64_t* sp = (uint64_t*)(uintptr_t)((uint64_t)(uintptr_t)ktop);
 
     /* User stack: choose 16-byte aligned top */
-    uint64_t u_top = (uint64_t)(uintptr_t)(t->ustack + t->ustack_size);
+    uint64_t u_top = (uint64_t)(uintptr_t)t->ustack_top;
     u_top &= ~0xFULL;
 
     const uint64_t rflags = 0x202ULL;
@@ -124,7 +125,7 @@ static thread_t* thread_alloc_slot(void) {
 
 void scheduler_init(void) {
     memset(g_threads, 0, sizeof(g_threads));
-    kspace_cr3 = read_cr3();
+    kspace_cr3 = vmm_kernel_cr3();
 
     /* Bootstrap thread = current execution context (kernel_main). */
     thread_t* t0 = &g_threads[0];
@@ -292,12 +293,16 @@ thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg) {
     return t;
 }
 
-thread_t* thread_create_user(const char* name, uint64_t user_rip) {
+thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_start, uint64_t cr3) {
     thread_t* t = thread_alloc_slot();
     if (!t) return 0;
 
     t->is_user = true;
-    t->cr3 = kspace_cr3; /* same address space for now */
+    t->cr3 = cr3;
+    if (!t->cr3) {
+        t->state = THREAD_UNUSED;
+        return 0;
+    }
     t->kstack_size = KSTACK_PAGES * PAGE_SIZE;
     t->kstack = (uint8_t*)alloc_pages(KSTACK_PAGES);
     if (!t->kstack) {
@@ -306,14 +311,28 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip) {
     }
 
     t->ustack_size = USTACK_PAGES * PAGE_SIZE;
-    t->ustack = (uint8_t*)alloc_pages(USTACK_PAGES);
-    if (!t->ustack) {
+    uint64_t stack_phys = pmm_alloc_pages(USTACK_PAGES);
+    if (!stack_phys) {
         t->state = THREAD_UNUSED;
         return 0;
     }
+    memset((void*)(uintptr_t)stack_phys, 0, t->ustack_size);
+
+    uint64_t user_stack_base = USER_STACK_TOP - t->ustack_size;
+    if (!vmm_map_range(t->cr3, user_stack_base, stack_phys, t->ustack_size,
+                       VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER)) {
+        pmm_free_pages(stack_phys, USTACK_PAGES);
+        t->state = THREAD_UNUSED;
+        return 0;
+    }
+    t->ustack = (uint8_t*)(uintptr_t)stack_phys;
+    t->ustack_top = USER_STACK_TOP;
 
     memset(t->name, 0, sizeof(t->name));
     for (size_t i = 0; i < sizeof(t->name)-1 && name[i]; i++) t->name[i] = name[i];
+
+    t->brk_start = brk_start;
+    t->brk_end = brk_start;
 
     build_user_thread_frame(t, user_rip);
 

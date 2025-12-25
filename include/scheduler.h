@@ -10,7 +10,7 @@ void scheduler_add(thread_t* t);
 thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg);
 
 /* Create a user thread that starts at user_rip with a fresh user stack. */
-thread_t* thread_create_user(const char* name, uint64_t user_rip);
+thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_start, uint64_t cr3);
 
 /* Called from timer IRQ handler; returns frame to resume. */
 intr_frame_t* scheduler_on_tick(intr_frame_t* frame);

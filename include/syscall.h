@@ -5,5 +5,6 @@
 #define SYS_write 1
 #define SYS_exit  2
 #define SYS_yield 3
+#define SYS_brk   4
 
 intr_frame_t* syscall_handle(intr_frame_t* frame);
