@@ -1,4 +1,5 @@
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/cpu.h"
 #include "console.h"
 #include "lib.h"
 
@@ -25,11 +26,11 @@ typedef struct {
     uint64_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
-static uint64_t gdt[7];
-static tss_t tss;
-static uint8_t df_stack[4096] __attribute__((aligned(16)));
+static uint64_t gdt_tables[MAX_CPUS][7];
+static tss_t tss_tables[MAX_CPUS];
+static uint8_t df_stacks[MAX_CPUS][4096] __attribute__((aligned(16)));
 
-static void set_tss_descriptor(uint64_t base, uint32_t limit) {
+static void set_tss_descriptor(uint64_t* gdt, uint64_t base, uint32_t limit) {
     uint64_t low = 0;
     uint64_t high = 0;
 
@@ -47,12 +48,19 @@ static void set_tss_descriptor(uint64_t base, uint32_t limit) {
 }
 
 void tss_set_rsp0(uint64_t rsp0) {
-    tss.rsp0 = rsp0;
+    uint32_t cpu_id = cpu_current_id();
+    if (cpu_id >= MAX_CPUS) cpu_id = 0;
+    tss_tables[cpu_id].rsp0 = rsp0;
 }
 
-void gdt_init(void) {
-    memset(gdt, 0, sizeof(gdt));
-    memset(&tss, 0, sizeof(tss));
+void gdt_init_cpu(uint32_t cpu_id) {
+    if (cpu_id >= MAX_CPUS) cpu_id = 0;
+    uint64_t* gdt = gdt_tables[cpu_id];
+    tss_t* tss = &tss_tables[cpu_id];
+    uint8_t* df_stack = df_stacks[cpu_id];
+
+    memset(gdt, 0, sizeof(gdt_tables[cpu_id]));
+    memset(tss, 0, sizeof(tss_tables[cpu_id]));
 
     /* Kernel code/data */
     gdt[1] = 0x00AF9A000000FFFFULL;
@@ -63,13 +71,13 @@ void gdt_init(void) {
     gdt[4] = 0x00CFF2000000FFFFULL;
 
     /* TSS */
-    tss.iomap_base = (uint16_t)sizeof(tss_t);
-    tss.ist1 = (uint64_t)(uintptr_t)(df_stack + sizeof(df_stack));
-    set_tss_descriptor((uint64_t)(uintptr_t)&tss, (uint32_t)(sizeof(tss_t) - 1));
+    tss->iomap_base = (uint16_t)sizeof(tss_t);
+    tss->ist1 = (uint64_t)(uintptr_t)(df_stack + sizeof(df_stacks[cpu_id]));
+    set_tss_descriptor(gdt, (uint64_t)(uintptr_t)tss, (uint32_t)(sizeof(tss_t) - 1));
 
     gdt_ptr_t gdtr = {
-        .limit = (uint16_t)(sizeof(gdt) - 1),
-        .base  = (uint64_t)(uintptr_t)&gdt[0],
+        .limit = (uint16_t)(sizeof(gdt_tables[cpu_id]) - 1),
+        .base  = (uint64_t)(uintptr_t)gdt,
     };
 
     __asm__ volatile ("lgdt %0" : : "m"(gdtr));
@@ -89,6 +97,10 @@ void gdt_init(void) {
     __asm__ volatile ("ltr %0" : : "r"((uint16_t)GDT_SEL_TSS));
 
     console_write("[gdt] loaded GDT + TSS, IST1=");
-    console_write_hex64(tss.ist1);
+    console_write_hex64(tss->ist1);
     console_write("\n");
+}
+
+void gdt_init(void) {
+    gdt_init_cpu(0);
 }

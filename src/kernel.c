@@ -20,6 +20,7 @@
 #include "arch/x86_64/irq.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/pit.h"
+#include "arch/x86_64/smp.h"
 #include "arch/x86_64/common.h"
 #include "scheduler.h"
 #include "thread.h"
@@ -121,6 +122,10 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
 
     /* Scheduler */
     scheduler_init();
+
+    /* SMP bring-up (APIC + APs) */
+    smp_init();
+
     input_init();
     disk_init();
     net_init();

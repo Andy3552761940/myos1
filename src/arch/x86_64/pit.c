@@ -1,4 +1,5 @@
 #include "arch/x86_64/pit.h"
+#include "arch/x86_64/smp.h"
 #include "io.h"
 
 #define PIT_CH0      0x40
@@ -26,6 +27,7 @@ void pit_init(uint32_t hz) {
 
 void pit_handle_irq0(void) {
     g_ticks++;
+    smp_broadcast_tick();
 }
 
 uint64_t pit_ticks(void) {

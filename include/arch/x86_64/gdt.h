@@ -8,8 +8,9 @@
 #define GDT_SEL_UDATA 0x23  /* index 4, RPL=3 */
 #define GDT_SEL_TSS   0x28  /* index 5 */
 
-/* Initialize a full GDT and load a TSS (also sets IST1). */
+/* Initialize a full GDT and load a TSS (also sets IST1) for a CPU. */
 void gdt_init(void);
+void gdt_init_cpu(uint32_t cpu_id);
 
 /* Update kernel RSP0 used on privilege change (ring3->ring0). */
 void tss_set_rsp0(uint64_t rsp0);

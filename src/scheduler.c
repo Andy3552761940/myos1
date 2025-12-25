@@ -8,19 +8,25 @@
 #include "arch/x86_64/common.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/pit.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/spinlock.h"
 
 #define MAX_THREADS   64
 #define KSTACK_PAGES  4   /* 16 KiB */
 #define USTACK_PAGES  4   /* 16 KiB */
 
 static thread_t g_threads[MAX_THREADS];
-static thread_t* g_current = 0;
+static thread_t* g_current[MAX_CPUS];
 static uint64_t g_next_id = 1;
+static spinlock_t g_sched_lock;
+static uint32_t g_cpu_rr = 0;
 
 static uint64_t kspace_cr3 = 0;
 
 thread_t* thread_current(void) {
-    return g_current;
+    uint32_t cpu = cpu_current_id();
+    if (cpu >= MAX_CPUS) cpu = 0;
+    return g_current[cpu];
 }
 
 static void* alloc_pages(size_t pages) {
@@ -126,9 +132,20 @@ static thread_t* thread_alloc_slot(void) {
     return 0;
 }
 
+static uint32_t scheduler_pick_cpu(void) {
+    uint32_t online = cpu_online_count();
+    if (online == 0) return 0;
+    uint32_t cpu = g_cpu_rr % online;
+    g_cpu_rr = (g_cpu_rr + 1) % online;
+    return cpu;
+}
+
 void scheduler_init(void) {
     memset(g_threads, 0, sizeof(g_threads));
     kspace_cr3 = vmm_kernel_cr3();
+    memset(g_current, 0, sizeof(g_current));
+    spinlock_init(&g_sched_lock);
+    g_cpu_rr = 0;
 
     /* Bootstrap thread = current execution context (kernel_main). */
     thread_t* t0 = &g_threads[0];
@@ -138,9 +155,10 @@ void scheduler_init(void) {
     t0->is_user = false;
     t0->priority = 1;
     t0->cr3 = kspace_cr3;
+    t0->cpu_id = 0;
     strncpy(t0->name, "bootstrap", sizeof(t0->name)-1);
 
-    g_current = t0;
+    g_current[0] = t0;
 
     /* RSP0 for privilege switches while still on bootstrap thread. */
     extern uint8_t stack_top[];
@@ -156,7 +174,7 @@ void scheduler_add(thread_t* t) {
     /* Threads are stored in a fixed array; nothing else needed. */
 }
 
-static thread_t* pick_next(void) {
+static thread_t* pick_next(uint32_t cpu_id) {
     /* Priority-based pick: choose READY thread with highest priority. */
     thread_t* best = 0;
     int best_prio = -1;
@@ -164,6 +182,7 @@ static thread_t* pick_next(void) {
     for (size_t i = 0; i < MAX_THREADS; i++) {
         thread_t* t = &g_threads[i];
         if (t->state != THREAD_READY) continue;
+        if (t->cpu_id != cpu_id) continue;
         if (!best || t->priority > best_prio) {
             best = t;
             best_prio = t->priority;
@@ -171,8 +190,9 @@ static thread_t* pick_next(void) {
     }
 
     if (best) return best;
-    if (g_current && (g_current->state == THREAD_RUNNING || g_current->state == THREAD_READY)) {
-        return g_current;
+    if (g_current[cpu_id] &&
+        (g_current[cpu_id]->state == THREAD_RUNNING || g_current[cpu_id]->state == THREAD_READY)) {
+        return g_current[cpu_id];
     }
     return &g_threads[0];
 }
@@ -237,10 +257,10 @@ static thread_t* find_thread_by_id(int pid) {
     return 0;
 }
 
-static intr_frame_t* do_switch(intr_frame_t* frame, thread_t* next) {
-    if (next == g_current) return frame;
+static intr_frame_t* do_switch(uint32_t cpu_id, intr_frame_t* frame, thread_t* next) {
+    if (next == g_current[cpu_id]) return frame;
 
-    thread_t* prev = g_current;
+    thread_t* prev = g_current[cpu_id];
 
     /* Save current context */
     prev->rsp = (uint64_t)(uintptr_t)frame;
@@ -248,7 +268,7 @@ static intr_frame_t* do_switch(intr_frame_t* frame, thread_t* next) {
 
     /* Activate next */
     next->state = THREAD_RUNNING;
-    g_current = next;
+    g_current[cpu_id] = next;
 
     /* Update RSP0 for privilege switches (user threads need it). */
     if (next->kstack) {
@@ -265,20 +285,26 @@ static intr_frame_t* do_switch(intr_frame_t* frame, thread_t* next) {
 }
 
 intr_frame_t* scheduler_on_tick(intr_frame_t* frame) {
+    uint32_t cpu_id = cpu_current_id();
+    spinlock_lock(&g_sched_lock);
     wake_sleepers();
-    thread_t* next = pick_next();
-    return do_switch(frame, next);
+    thread_t* next = pick_next(cpu_id);
+    intr_frame_t* next_frame = do_switch(cpu_id, frame, next);
+    spinlock_unlock(&g_sched_lock);
+    return next_frame;
 }
 
 intr_frame_t* scheduler_fork(intr_frame_t* frame) {
-    thread_t* parent = g_current;
+    thread_t* parent = thread_current();
     if (!parent || !parent->is_user) {
         frame->rax = (uint64_t)-1;
         return frame;
     }
 
+    spinlock_lock(&g_sched_lock);
     thread_t* child = thread_alloc_slot();
     if (!child) {
+        spinlock_unlock(&g_sched_lock);
         frame->rax = (uint64_t)-1;
         return frame;
     }
@@ -286,6 +312,7 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
     child->is_user = true;
     child->cr3 = parent->cr3;
     child->priority = parent->priority;
+    child->cpu_id = parent->cpu_id;
     child->parent = parent;
     parent->children++;
     child->ustack = parent->ustack;
@@ -307,6 +334,7 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
             }
             child->open_file_count = 0;
             child->state = THREAD_UNUSED;
+            spinlock_unlock(&g_sched_lock);
             frame->rax = (uint64_t)-1;
             return frame;
         }
@@ -319,6 +347,7 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
     child->kstack = (uint8_t*)pmm_alloc_pages(child->kstack_size / PAGE_SIZE);
     if (!child->kstack) {
         child->state = THREAD_UNUSED;
+        spinlock_unlock(&g_sched_lock);
         frame->rax = (uint64_t)-1;
         return frame;
     }
@@ -331,26 +360,33 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
     child->state = THREAD_READY;
 
     frame->rax = child->id;
+    spinlock_unlock(&g_sched_lock);
     return frame;
 }
 
 intr_frame_t* scheduler_yield(intr_frame_t* frame) {
+    uint32_t cpu_id = cpu_current_id();
+    spinlock_lock(&g_sched_lock);
     wake_sleepers();
-    thread_t* next = pick_next();
-    return do_switch(frame, next);
+    thread_t* next = pick_next(cpu_id);
+    intr_frame_t* next_frame = do_switch(cpu_id, frame, next);
+    spinlock_unlock(&g_sched_lock);
+    return next_frame;
 }
 
 intr_frame_t* scheduler_on_exit(intr_frame_t* frame, int exit_code) {
-    thread_t* cur = g_current;
+    uint32_t cpu_id = cpu_current_id();
+    thread_t* cur = g_current[cpu_id];
     console_write("[sched] thread ");
     console_write_dec_u64(cur->id);
     console_write(" exited\n");
 
+    spinlock_lock(&g_sched_lock);
     cur->rsp = (uint64_t)(uintptr_t)frame;
     thread_mark_zombie(cur, exit_code);
 
     /* Pick next READY thread; if none, fall back to bootstrap (should be READY/RUNNING). */
-    thread_t* next = pick_next();
+    thread_t* next = pick_next(cpu_id);
     if (next == cur) {
         /* No other READY threads: run bootstrap. */
         next = &g_threads[0];
@@ -360,32 +396,49 @@ intr_frame_t* scheduler_on_exit(intr_frame_t* frame, int exit_code) {
         }
     }
 
-    return do_switch(frame, next);
+    intr_frame_t* next_frame = do_switch(cpu_id, frame, next);
+    spinlock_unlock(&g_sched_lock);
+    return next_frame;
 }
 
 void scheduler_sleep(uint64_t ticks) {
     /* Only usable from thread context if you have a way to reschedule; keep simple. */
-    thread_t* cur = g_current;
+    thread_t* cur = thread_current();
+    spinlock_lock(&g_sched_lock);
     cur->wakeup_tick = pit_ticks() + ticks;
     cur->state = THREAD_SLEEPING;
+    spinlock_unlock(&g_sched_lock);
     /* Force a yield via int 0x80 SYS_yield (works in ring0 too). */
     __asm__ volatile ("movq $3, %%rax; int $0x80" : : : "rax", "memory");
 }
 
 int scheduler_kill(int pid, int sig) {
+    spinlock_lock(&g_sched_lock);
     thread_t* target = find_thread_by_id(pid);
-    if (!target || !target->is_user) return -1;
-    if (target == g_current) return 0;
-    if (target->state == THREAD_ZOMBIE) return 0;
+    if (!target || !target->is_user) {
+        spinlock_unlock(&g_sched_lock);
+        return -1;
+    }
+    if (target == thread_current()) {
+        spinlock_unlock(&g_sched_lock);
+        return 0;
+    }
+    if (target->state == THREAD_ZOMBIE) {
+        spinlock_unlock(&g_sched_lock);
+        return 0;
+    }
     thread_mark_zombie(target, -sig);
+    spinlock_unlock(&g_sched_lock);
     return 0;
 }
 
 uint64_t scheduler_thread_count(void) {
+    spinlock_lock(&g_sched_lock);
     uint64_t count = 0;
     for (size_t i = 0; i < MAX_THREADS; i++) {
         if (g_threads[i].state != THREAD_UNUSED) count++;
     }
+    spinlock_unlock(&g_sched_lock);
     return count;
 }
 
@@ -402,9 +455,10 @@ static thread_t* find_child(thread_t* parent, int pid, bool require_zombie) {
 }
 
 intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_ptr) {
-    thread_t* cur = g_current;
+    thread_t* cur = thread_current();
     if (!cur) return frame;
 
+    spinlock_lock(&g_sched_lock);
     thread_t* zombie = find_child(cur, pid, true);
     if (zombie) {
         if (status_ptr) {
@@ -421,6 +475,7 @@ intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_pt
         zombie->open_file_count = 0;
         zombie->state = THREAD_UNUSED;
         frame->rax = zombie->id;
+        spinlock_unlock(&g_sched_lock);
         return frame;
     }
 
@@ -428,6 +483,7 @@ intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_pt
     thread_t* any_child = find_child(cur, pid, false);
     if (!any_child) {
         frame->rax = (uint64_t)-1;
+        spinlock_unlock(&g_sched_lock);
         return frame;
     }
 
@@ -435,10 +491,12 @@ intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_pt
     cur->wait_target = pid;
     cur->wait_status_ptr = status_ptr;
     cur->state = THREAD_BLOCKED;
+    spinlock_unlock(&g_sched_lock);
     return scheduler_yield(frame);
 }
 
 void scheduler_dump(void) {
+    spinlock_lock(&g_sched_lock);
     console_write("[sched] threads:\n");
     for (size_t i = 0; i < MAX_THREADS; i++) {
         thread_t* t = &g_threads[i];
@@ -462,20 +520,59 @@ void scheduler_dump(void) {
         console_write_dec_u64((uint64_t)t->priority);
         console_write("\n");
     }
+    spinlock_unlock(&g_sched_lock);
 }
 
-thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg) {
+void scheduler_register_cpu_bootstrap(uint32_t cpu_id, uint8_t* stack_base, size_t stack_size) {
+    if (cpu_id >= MAX_CPUS) cpu_id = 0;
+    spinlock_lock(&g_sched_lock);
     thread_t* t = thread_alloc_slot();
-    if (!t) return 0;
+    if (!t) {
+        spinlock_unlock(&g_sched_lock);
+        return;
+    }
 
     t->is_user = false;
     t->cr3 = kspace_cr3;
-    t->parent = g_current;
+    t->priority = 1;
+    t->cpu_id = cpu_id;
+    t->state = THREAD_RUNNING;
+    t->kstack = stack_base;
+    t->kstack_size = stack_size;
+    memset(t->name, 0, sizeof(t->name));
+    t->name[0] = 'c';
+    t->name[1] = 'p';
+    t->name[2] = 'u';
+    t->name[3] = (char)('0' + (cpu_id % 10));
+    t->name[4] = '_';
+    t->name[5] = 'b';
+    t->name[6] = 's';
+    t->name[7] = 'p';
+    t->name[8] = 0;
+
+    g_current[cpu_id] = t;
+    tss_set_rsp0((uint64_t)(uintptr_t)(stack_base + stack_size));
+    spinlock_unlock(&g_sched_lock);
+}
+
+thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg) {
+    spinlock_lock(&g_sched_lock);
+    thread_t* t = thread_alloc_slot();
+    if (!t) {
+        spinlock_unlock(&g_sched_lock);
+        return 0;
+    }
+
+    t->is_user = false;
+    t->cr3 = kspace_cr3;
+    t->parent = thread_current();
     if (t->parent) t->parent->children++;
+    t->cpu_id = scheduler_pick_cpu();
     t->kstack_size = KSTACK_PAGES * PAGE_SIZE;
     t->kstack = (uint8_t*)alloc_pages(KSTACK_PAGES);
     if (!t->kstack) {
         t->state = THREAD_UNUSED;
+        spinlock_unlock(&g_sched_lock);
         return 0;
     }
 
@@ -485,25 +582,33 @@ thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg) {
 
     build_kernel_thread_frame(t, fn, arg);
     t->state = THREAD_READY;
+    spinlock_unlock(&g_sched_lock);
     return t;
 }
 
 thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_start, uint64_t cr3) {
+    spinlock_lock(&g_sched_lock);
     thread_t* t = thread_alloc_slot();
-    if (!t) return 0;
+    if (!t) {
+        spinlock_unlock(&g_sched_lock);
+        return 0;
+    }
 
     t->is_user = true;
     t->cr3 = cr3;
-    t->parent = g_current;
+    t->parent = thread_current();
     if (t->parent) t->parent->children++;
+    t->cpu_id = scheduler_pick_cpu();
     if (!t->cr3) {
         t->state = THREAD_UNUSED;
+        spinlock_unlock(&g_sched_lock);
         return 0;
     }
     t->kstack_size = KSTACK_PAGES * PAGE_SIZE;
     t->kstack = (uint8_t*)alloc_pages(KSTACK_PAGES);
     if (!t->kstack) {
         t->state = THREAD_UNUSED;
+        spinlock_unlock(&g_sched_lock);
         return 0;
     }
 
@@ -511,6 +616,7 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_s
     uint64_t stack_phys = pmm_alloc_pages(USTACK_PAGES);
     if (!stack_phys) {
         t->state = THREAD_UNUSED;
+        spinlock_unlock(&g_sched_lock);
         return 0;
     }
     memset((void*)(uintptr_t)stack_phys, 0, t->ustack_size);
@@ -520,6 +626,7 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_s
                        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER)) {
         pmm_free_pages(stack_phys, USTACK_PAGES);
         t->state = THREAD_UNUSED;
+        spinlock_unlock(&g_sched_lock);
         return 0;
     }
     t->ustack = (uint8_t*)(uintptr_t)stack_phys;
@@ -535,5 +642,6 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_s
     build_user_thread_frame(t, user_rip);
 
     t->state = THREAD_READY;
+    spinlock_unlock(&g_sched_lock);
     return t;
 }

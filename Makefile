@@ -53,9 +53,14 @@ KERNEL_SRCS := \
     src/hpet.c \
     src/arch/x86_64/gdt.c \
     src/arch/x86_64/idt.c \
+    src/arch/x86_64/apic.c \
+    src/arch/x86_64/cpu.c \
+    src/arch/x86_64/mp.c \
+    src/arch/x86_64/smp.c \
     src/arch/x86_64/pic.c \
     src/arch/x86_64/pit.c \
     src/arch/x86_64/irq.c \
+    src/arch/x86_64/ap_trampoline.S \
     src/arch/x86_64/interrupts.S \
     src/arch/x86_64/interrupt_dispatch.c
 

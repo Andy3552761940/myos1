@@ -3,6 +3,7 @@
 #include "arch/x86_64/irq.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/pit.h"
+#include "arch/x86_64/apic.h"
 #include "console.h"
 #include "scheduler.h"
 #include "thread.h"
@@ -115,6 +116,15 @@ intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
         }
 
         irq_exit();
+        return frame;
+    }
+
+    if (n == APIC_RESCHED_VECTOR) {
+        apic_eoi();
+        return scheduler_on_tick(frame);
+    }
+
+    if (n == APIC_SPURIOUS_VECTOR) {
         return frame;
     }
 

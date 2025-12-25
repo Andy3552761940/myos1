@@ -5,6 +5,7 @@
 
 void scheduler_init(void);
 void scheduler_add(thread_t* t);
+void scheduler_register_cpu_bootstrap(uint32_t cpu_id, uint8_t* stack_base, size_t stack_size);
 
 /* Create a kernel thread that runs fn(arg). */
 thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg);

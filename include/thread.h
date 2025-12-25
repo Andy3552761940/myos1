@@ -62,6 +62,8 @@ typedef struct thread {
 
     uint64_t wakeup_tick;
 
+    uint32_t cpu_id;
+
     /* For kernel thread trampoline */
     void (*kentry)(void*);
     void* karg;
