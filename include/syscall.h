@@ -27,6 +27,7 @@
 #define SYS_sysinfo 23
 #define SYS_mmap 24
 #define SYS_kill 25
+#define SYS_readdir 26
 
 #define SYS_SEEK_SET 0
 #define SYS_SEEK_CUR 1

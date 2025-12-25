@@ -26,6 +26,7 @@
 #define SYS_sysinfo 23
 #define SYS_mmap 24
 #define SYS_kill 25
+#define SYS_readdir 26
 
 #define SYS_SEEK_SET 0
 #define SYS_SEEK_CUR 1
@@ -111,6 +112,10 @@ static inline int64_t sys_read(int64_t fd, void* buf, int64_t len) {
 
 static inline int64_t sys_close(int64_t fd) {
     return sys_call1(SYS_close, fd);
+}
+
+static inline int64_t sys_readdir(int64_t fd, char* buf, int64_t len) {
+    return sys_call3(SYS_readdir, fd, (int64_t)(uintptr_t)buf, len);
 }
 
 static inline int64_t sys_lseek(int64_t fd, int64_t offset, int64_t whence) {

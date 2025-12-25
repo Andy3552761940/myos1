@@ -13,6 +13,7 @@
 #include "arch/x86_64/pit.h"
 #include "time.h"
 #include "net.h"
+#include "input.h"
 
 #define USTACK_PAGES  4
 
@@ -82,6 +83,64 @@ static uint64_t mmap_map_anonymous(thread_t* t, uint64_t addr, uint64_t len, int
     }
 
     return base;
+}
+
+static char scancode_to_char(uint8_t scancode, int shift) {
+    static const char keymap[128] = {
+        0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
+        'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's',
+        'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v',
+        'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ', 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, '7', '8', '9', '-', '4', '5', '6', '+', '1', '2',
+        '3', '0', '.', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+    static const char keymap_shift[128] = {
+        0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t',
+        'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S',
+        'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|', 'Z', 'X', 'C', 'V',
+        'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, '7', '8', '9', '-', '4', '5', '6', '+', '1', '2',
+        '3', '0', '.', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+    if (scancode >= 128) return 0;
+    return shift ? keymap_shift[scancode] : keymap[scancode];
+}
+
+static uint64_t stdin_read_chars(char* buf, uint64_t len) {
+    uint64_t count = 0;
+    int shift = 0;
+    while (count < len) {
+        key_event_t ev;
+        if (!input_read_key(&ev)) {
+            cpu_hlt();
+            continue;
+        }
+
+        if (!ev.pressed) {
+            if (ev.scancode == 0x2A || ev.scancode == 0x36) shift = 0;
+            continue;
+        }
+
+        if (ev.scancode == 0x2A || ev.scancode == 0x36) {
+            shift = 1;
+            continue;
+        }
+
+        char c = scancode_to_char(ev.scancode, shift);
+        if (!c) continue;
+
+        if (c == '\b') {
+            if (count > 0) count--;
+            continue;
+        }
+
+        buf[count++] = c;
+        console_putc(c);
+        if (c == '\n') break;
+    }
+    return count;
 }
 
 intr_frame_t* syscall_handle(intr_frame_t* frame) {
@@ -258,6 +317,14 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             void* buf = (void*)(uintptr_t)frame->rsi;
             size_t len = (size_t)frame->rdx;
             thread_t* t = thread_current();
+            if (fd == 0) {
+                if (!buf || len == 0) {
+                    frame->rax = 0;
+                    return frame;
+                }
+                frame->rax = stdin_read_chars((char*)buf, len);
+                return frame;
+            }
             vfs_file_t* file = vfs_fd_get(t, fd);
             if (!file || !(file->flags & VFS_O_RDONLY)) {
                 frame->rax = (uint64_t)-1;
@@ -419,6 +486,37 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             } else {
                 frame->rax = (uint64_t)net_close(fd);
             }
+            return frame;
+        }
+        case SYS_readdir: {
+            int fd = (int)frame->rdi;
+            char* buf = (char*)(uintptr_t)frame->rsi;
+            size_t len = (size_t)frame->rdx;
+            thread_t* t = thread_current();
+            vfs_file_t* file = vfs_fd_get(t, fd);
+            if (!file || !file->node || file->node->type != VFS_NODE_DIR || !buf || len == 0) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+
+            size_t idx = file->offset;
+            vfs_node_t* child = file->node->children;
+            while (child && idx > 0) {
+                child = child->next;
+                idx--;
+            }
+
+            if (!child) {
+                frame->rax = 0;
+                return frame;
+            }
+
+            size_t name_len = strlen(child->name);
+            if (name_len >= len) name_len = len - 1;
+            memcpy(buf, child->name, name_len);
+            buf[name_len] = 0;
+            file->offset++;
+            frame->rax = (uint64_t)name_len;
             return frame;
         }
         default:

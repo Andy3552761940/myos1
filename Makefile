@@ -25,7 +25,7 @@ CFLAGS := -std=c11 -O2 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -no
 LDFLAGS := -nostdlib -no-pie -Wl,-T,linker.ld -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 -Wl,-z,noexecstack
 
 USER_CFLAGS := -std=c11 -O2 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -no-pie \
-               -m64 -mcmodel=large -Wall -Wextra -Werror -Iuser
+               -m64 -mcmodel=large -Wall -Wextra -Werror -Iuser -Iinclude
 USER_LDFLAGS := -nostdlib -no-pie -Wl,-T,user/user.ld -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 -Wl,-z,noexecstack -Wl,-z,noexecstack
 
 KERNEL_SRCS := \
@@ -78,8 +78,8 @@ $(BUILD)/%.o: src/%.S | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Userland init.elf
-$(USER_ELF): user/start.S user/init.c user/malloc.c user/user.ld | $(BUILD)
-	$(CC) $(USER_CFLAGS) user/start.S user/init.c user/malloc.c -o $@ $(USER_LDFLAGS)
+$(USER_ELF): user/start.S user/init.c user/malloc.c user/lib.c user/user.ld | $(BUILD)
+	$(CC) $(USER_CFLAGS) user/start.S user/init.c user/malloc.c user/lib.c -o $@ $(USER_LDFLAGS)
 
 # Initramfs (tar) and embed object
 $(INITRAMFS_TAR): $(USER_ELF) | $(BUILD)
