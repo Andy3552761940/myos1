@@ -43,6 +43,7 @@ typedef struct thread {
     /* Kernel stack (always present). */
     uint8_t* kstack;
     size_t   kstack_size;
+    uint64_t kstack_canary;
 
     /* User stack (only for user threads). */
     uint8_t* ustack;
@@ -70,3 +71,5 @@ typedef struct thread {
 } thread_t;
 
 thread_t* thread_current(void);
+void thread_kstack_canary_init(thread_t* t);
+bool thread_kstack_canary_ok(const thread_t* t);

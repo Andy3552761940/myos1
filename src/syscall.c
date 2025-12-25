@@ -144,6 +144,22 @@ static uint64_t stdin_read_chars(char* buf, uint64_t len) {
 }
 
 intr_frame_t* syscall_handle(intr_frame_t* frame) {
+    thread_t* cur = thread_current();
+    bool from_user = (frame->cs & 3) == 3;
+    if (from_user) {
+        if (!cur || !cur->is_user) {
+            console_write("[syscall] denied: user-mode syscall without user thread\n");
+            frame->rax = (uint64_t)-1;
+            return frame;
+        }
+    } else {
+        if (cur && cur->is_user) {
+            console_write("[syscall] denied: kernel-mode syscall from user thread\n");
+            frame->rax = (uint64_t)-1;
+            return frame;
+        }
+    }
+
     uint64_t num = frame->rax;
 
     switch (num) {

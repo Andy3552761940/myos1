@@ -23,10 +23,32 @@ static uint32_t g_cpu_rr = 0;
 
 static uint64_t kspace_cr3 = 0;
 
+static uint64_t make_kstack_canary(const thread_t* t) {
+    uint64_t v = 0xC3A5C85C97CB3127ULL;
+    v ^= (uint64_t)(uintptr_t)t;
+    v ^= (uint64_t)(uintptr_t)t->kstack;
+    v ^= t->kstack_size;
+    v ^= pit_ticks();
+    v ^= ((uint64_t)cpu_current_id() << 32);
+    if (v == 0) v = 0xA5A5A5A5A5A5A5A5ULL;
+    return v;
+}
+
 thread_t* thread_current(void) {
     uint32_t cpu = cpu_current_id();
     if (cpu >= MAX_CPUS) cpu = 0;
     return g_current[cpu];
+}
+
+void thread_kstack_canary_init(thread_t* t) {
+    if (!t || !t->kstack || t->kstack_size < sizeof(uint64_t)) return;
+    t->kstack_canary = make_kstack_canary(t);
+    *(uint64_t*)(uintptr_t)t->kstack = t->kstack_canary;
+}
+
+bool thread_kstack_canary_ok(const thread_t* t) {
+    if (!t || !t->kstack || t->kstack_size < sizeof(uint64_t)) return true;
+    return *(const uint64_t*)(uintptr_t)t->kstack == t->kstack_canary;
 }
 
 static void* alloc_pages(size_t pages) {
@@ -162,6 +184,10 @@ void scheduler_init(void) {
 
     /* RSP0 for privilege switches while still on bootstrap thread. */
     extern uint8_t stack_top[];
+    extern uint8_t stack_bottom[];
+    t0->kstack = stack_bottom;
+    t0->kstack_size = (size_t)(stack_top - stack_bottom);
+    thread_kstack_canary_init(t0);
     tss_set_rsp0((uint64_t)(uintptr_t)stack_top);
 
     console_write("[sched] init, CR3=");
@@ -351,6 +377,7 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
         frame->rax = (uint64_t)-1;
         return frame;
     }
+    thread_kstack_canary_init(child);
 
     uint8_t* top = child->kstack + child->kstack_size;
     intr_frame_t* child_frame = (intr_frame_t*)(top - sizeof(intr_frame_t));
@@ -539,6 +566,7 @@ void scheduler_register_cpu_bootstrap(uint32_t cpu_id, uint8_t* stack_base, size
     t->state = THREAD_RUNNING;
     t->kstack = stack_base;
     t->kstack_size = stack_size;
+    thread_kstack_canary_init(t);
     memset(t->name, 0, sizeof(t->name));
     t->name[0] = 'c';
     t->name[1] = 'p';
@@ -575,6 +603,7 @@ thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg) {
         spinlock_unlock(&g_sched_lock);
         return 0;
     }
+    thread_kstack_canary_init(t);
 
     /* Copy name */
     memset(t->name, 0, sizeof(t->name));
@@ -611,6 +640,7 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_s
         spinlock_unlock(&g_sched_lock);
         return 0;
     }
+    thread_kstack_canary_init(t);
 
     t->ustack_size = USTACK_PAGES * PAGE_SIZE;
     uint64_t stack_phys = pmm_alloc_pages(USTACK_PAGES);

@@ -94,6 +94,27 @@ static void log_current_thread(void) {
 }
 
 intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
+    thread_t* cur = thread_current();
+    if (cur && cur->kstack && cur->kstack_size >= sizeof(uint64_t)) {
+        uint64_t actual = *(uint64_t*)(uintptr_t)cur->kstack;
+        if (actual != cur->kstack_canary) {
+            console_write("\n[STACK] kernel stack overflow detected");
+            log_current_thread();
+            console_write("\n");
+            console_write(" expected=");
+            console_write_hex64(cur->kstack_canary);
+            console_write(" actual=");
+            console_write_hex64(actual);
+            console_write("\n");
+
+            if ((frame->cs & 3) == 3) {
+                return scheduler_on_exit(frame, -1);
+            }
+            console_write("[PANIC] kernel stack corruption, halting.\n");
+            for (;;) { cpu_hlt(); }
+        }
+    }
+
     uint64_t n = frame->int_no;
 
     /* IRQs (PIC remapped to 32-47) */
