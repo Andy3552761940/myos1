@@ -245,3 +245,53 @@ bool virtio_blk_read_sector(uint64_t sector, void* out512) {
 
     return d->status == 0;
 }
+
+bool virtio_blk_write_sector(uint64_t sector, const void* in512) {
+    if (!g_inited) return false;
+
+    virtio_blk_t* d = &g_dev;
+    const uint16_t qsz = d->queue_num;
+    if (qsz < 3) return false;
+
+    d->req.type = 1; /* VIRTIO_BLK_T_OUT */
+    d->req.reserved = 0;
+    d->req.sector = sector;
+    d->status = 0xFF;
+
+    d->desc[0].addr = (uint64_t)(uintptr_t)&d->req;
+    d->desc[0].len = sizeof(d->req);
+    d->desc[0].flags = VIRTQ_DESC_F_NEXT;
+    d->desc[0].next = 1;
+
+    d->desc[1].addr = (uint64_t)(uintptr_t)in512;
+    d->desc[1].len = 512;
+    d->desc[1].flags = VIRTQ_DESC_F_NEXT;
+    d->desc[1].next = 2;
+
+    d->desc[2].addr = (uint64_t)(uintptr_t)&d->status;
+    d->desc[2].len = 1;
+    d->desc[2].flags = VIRTQ_DESC_F_WRITE;
+    d->desc[2].next = 0;
+
+    uint16_t* avail_ring = (uint16_t*)((uint8_t*)d->avail + 4);
+    uint16_t idx = d->avail->idx;
+    avail_ring[idx % qsz] = 0;
+    mb();
+    d->avail->idx = (uint16_t)(idx + 1);
+    mb();
+
+    out16(d->io_base, VIRTIO_PCI_QUEUE_NOTIFY, 0);
+
+    while (d->used->idx == d->last_used_idx) {
+        cpu_pause();
+    }
+
+    mb();
+    d->last_used_idx++;
+
+    return d->status == 0;
+}
+
+bool virtio_blk_is_ready(void) {
+    return g_inited != 0;
+}

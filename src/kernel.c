@@ -3,6 +3,9 @@
 #include "multiboot2.h"
 #include "pmm.h"
 #include "tarfs.h"
+#include "vfs.h"
+#include "memfs.h"
+#include "devfs.h"
 #include "elf.h"
 #include "pci.h"
 #include "virtio_blk.h"
@@ -70,6 +73,7 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
     /* Virtual memory + kernel heap. */
     vmm_init();
     kmalloc_init();
+    vfs_init(memfs_create_root());
 
     /* CPU tables */
     gdt_init();
@@ -88,21 +92,41 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
 
     /* Init tarfs initramfs embedded in kernel. */
     tarfs_init(_binary_build_initramfs_tar_start, _binary_build_initramfs_tar_end);
+    tarfs_populate_vfs(vfs_root());
+    vfs_mkdir("/rw");
+    devfs_init();
 
     /* Load and run init.elf from initramfs in user mode (reserve its memory early). */
-    const uint8_t* init_data = 0;
-    size_t init_size = 0;
-    if (!tarfs_find("init.elf", &init_data, &init_size)) {
+    vfs_file_t* init_file = vfs_open("/init.elf", VFS_O_RDONLY);
+    if (!init_file || !init_file->node) {
         console_write("[kernel] ERROR: init.elf not found in initramfs\n");
     } else {
+        size_t init_size = init_file->node->size;
+        uint8_t* init_data = 0;
+        if (init_size > 0) {
+            init_data = (uint8_t*)kmalloc(init_size);
+        }
+        if (!init_data && init_size > 0) {
+            console_write("[kernel] ERROR: failed to allocate init buffer\n");
+        } else if (init_size > 0) {
+            vfs_ssize_t nread = vfs_read(init_file, init_data, init_size);
+            if (nread < 0 || (size_t)nread != init_size) {
+                console_write("[kernel] ERROR: failed to read init.elf\n");
+                kfree(init_data);
+                init_data = 0;
+                init_size = 0;
+            }
+        }
         uint64_t entry = 0;
         uint64_t brk = 0;
         uint64_t init_cr3 = vmm_create_user_space();
-        if (init_cr3 && elf64_load_image(init_data, init_size, init_cr3, &entry, &brk)) {
+        if (init_data && init_cr3 && elf64_load_image(init_data, init_size, init_cr3, &entry, &brk)) {
             thread_create_user("init", entry, brk, init_cr3);
         } else {
             console_write("[kernel] ERROR: failed to load init.elf\n");
         }
+        if (init_data) kfree(init_data);
+        vfs_close(init_file);
     }
 
     /* Spawn a kernel logger thread. */

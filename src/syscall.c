@@ -5,7 +5,8 @@
 #include "lib.h"
 #include "vmm.h"
 #include "pmm.h"
-#include "tarfs.h"
+#include "vfs.h"
+#include "kmalloc.h"
 #include "elf.h"
 #include "arch/x86_64/common.h"
 
@@ -43,20 +44,40 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             }
 
             const char* path = (const char*)(uintptr_t)frame->rdi;
-            const uint8_t* data = 0;
-            size_t size = 0;
-            if (!tarfs_find(path, &data, &size)) {
+            vfs_file_t* file = vfs_open(path, VFS_O_RDONLY);
+            if (!file || !file->node) {
                 frame->rax = (uint64_t)-1;
                 return frame;
             }
+
+            size_t size = file->node->size;
+            uint8_t* data = 0;
+            if (size > 0) {
+                data = (uint8_t*)kmalloc(size);
+                if (!data) {
+                    vfs_close(file);
+                    frame->rax = (uint64_t)-1;
+                    return frame;
+                }
+                vfs_ssize_t nread = vfs_read(file, data, size);
+                if (nread < 0 || (size_t)nread != size) {
+                    vfs_close(file);
+                    kfree(data);
+                    frame->rax = (uint64_t)-1;
+                    return frame;
+                }
+            }
+            vfs_close(file);
 
             uint64_t new_cr3 = vmm_create_user_space();
             uint64_t entry = 0;
             uint64_t brk = 0;
             if (!new_cr3 || !elf64_load_image(data, size, new_cr3, &entry, &brk)) {
+                if (data) kfree(data);
                 frame->rax = (uint64_t)-1;
                 return frame;
             }
+            if (data) kfree(data);
 
             uint64_t stack_phys = pmm_alloc_pages(USTACK_PAGES);
             if (!stack_phys) {
