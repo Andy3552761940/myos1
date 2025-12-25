@@ -6,6 +6,7 @@
 #include "scheduler.h"
 #include "thread.h"
 #include "syscall.h"
+#include "input.h"
 
 static const char* exc_name(uint64_t n) {
     switch (n) {
@@ -84,6 +85,10 @@ intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
 
         if (irq == 0) {
             pit_handle_irq0();
+        } else if (irq == 1) {
+            input_handle_irq1();
+        } else if (irq == 12) {
+            input_handle_irq12();
         }
 
         /* Always EOI before potentially switching. */

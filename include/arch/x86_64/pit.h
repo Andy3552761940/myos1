@@ -7,3 +7,4 @@ void pit_init(uint32_t hz);
 void pit_handle_irq0(void);
 
 uint64_t pit_ticks(void);
+uint32_t pit_frequency_hz(void);

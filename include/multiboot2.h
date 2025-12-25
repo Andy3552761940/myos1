@@ -18,6 +18,7 @@ enum {
     MB2_TAG_CMDLINE    = 1,
     MB2_TAG_BOOTLOADER = 2,
     MB2_TAG_MMAP       = 6,
+    MB2_TAG_FRAMEBUFFER = 8,
 };
 
 typedef struct {
@@ -33,6 +34,18 @@ typedef struct {
     uint32_t type;
     uint32_t zero;
 } mb2_mmap_entry_t;
+
+typedef struct {
+    uint32_t type;
+    uint32_t size;
+    uint64_t framebuffer_addr;
+    uint32_t framebuffer_pitch;
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint8_t framebuffer_bpp;
+    uint8_t framebuffer_type;
+    uint16_t reserved;
+} mb2_tag_framebuffer_t;
 
 static inline uint32_t mb2_align8(uint32_t x) {
     return (x + 7u) & ~7u;

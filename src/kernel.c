@@ -11,6 +11,9 @@
 #include "virtio_blk.h"
 #include "vmm.h"
 #include "kmalloc.h"
+#include "input.h"
+#include "net.h"
+#include "time.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/pic.h"
@@ -38,6 +41,7 @@ static void klogger(void* arg) {
 
 static void pci_cb(const pci_dev_t* dev, void* user) {
     (void)user;
+    net_pci_probe(dev);
     if (dev->vendor_id == 0x1AF4) {
         console_write("[pci] virtio dev ");
         console_write_hex32(dev->device_id);
@@ -67,6 +71,26 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
         for (;;) cpu_hlt();
     }
 
+    /* Framebuffer tag (optional). */
+    const mb2_tag_t* tag = (const mb2_tag_t*)((const uint8_t*)mb2 + 8);
+    while (tag->type != MB2_TAG_END) {
+        if (tag->type == MB2_TAG_FRAMEBUFFER) {
+            const mb2_tag_framebuffer_t* fb = (const mb2_tag_framebuffer_t*)tag;
+            console_fb_info_t info = {
+                .base = (void*)(uintptr_t)fb->framebuffer_addr,
+                .width = fb->framebuffer_width,
+                .height = fb->framebuffer_height,
+                .pitch = fb->framebuffer_pitch,
+                .bpp = fb->framebuffer_bpp,
+                .type = fb->framebuffer_type,
+            };
+            console_set_framebuffer(&info);
+            console_write("[console] framebuffer enabled\n");
+            break;
+        }
+        tag = (const mb2_tag_t*)((const uint8_t*)tag + mb2_align8(tag->size));
+    }
+
     /* Memory manager (identity mapped 0..4GiB). */
     pmm_init(mb2);
 
@@ -82,13 +106,18 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
     /* PIC/PIT */
     pic_init();
     pit_init(100);
+    time_init();
 
     /* Mask all IRQs except PIT (IRQ0). */
     for (uint8_t i = 0; i < 16; i++) pic_set_mask(i, 1);
     pic_set_mask(0, 0);
+    pic_set_mask(1, 0);
+    pic_set_mask(12, 0);
 
     /* Scheduler */
     scheduler_init();
+    input_init();
+    net_init();
 
     /* Init tarfs initramfs embedded in kernel. */
     tarfs_init(_binary_build_initramfs_tar_start, _binary_build_initramfs_tar_end);

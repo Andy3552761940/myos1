@@ -3,6 +3,7 @@
 #include "virtio_blk.h"
 #include "kmalloc.h"
 #include "lib.h"
+#include "input.h"
 
 #define DEV_SECTOR_SIZE 512
 
@@ -63,6 +64,48 @@ static vfs_node_ops_t dev_disk_ops = {
     .unlink = 0,
 };
 
+static vfs_ssize_t dev_kbd_read(vfs_node_t* node, size_t offset, void* buf, size_t len) {
+    (void)node;
+    (void)offset;
+    if (!buf) return -1;
+
+    size_t count = len / sizeof(key_event_t);
+    key_event_t* out = (key_event_t*)buf;
+    size_t i = 0;
+    for (; i < count; i++) {
+        if (!input_read_key(&out[i])) break;
+    }
+    return (vfs_ssize_t)(i * sizeof(key_event_t));
+}
+
+static vfs_ssize_t dev_mouse_read(vfs_node_t* node, size_t offset, void* buf, size_t len) {
+    (void)node;
+    (void)offset;
+    if (!buf) return -1;
+
+    size_t count = len / sizeof(mouse_event_t);
+    mouse_event_t* out = (mouse_event_t*)buf;
+    size_t i = 0;
+    for (; i < count; i++) {
+        if (!input_read_mouse(&out[i])) break;
+    }
+    return (vfs_ssize_t)(i * sizeof(mouse_event_t));
+}
+
+static vfs_node_ops_t dev_kbd_ops = {
+    .read = dev_kbd_read,
+    .write = 0,
+    .create = 0,
+    .unlink = 0,
+};
+
+static vfs_node_ops_t dev_mouse_ops = {
+    .read = dev_mouse_read,
+    .write = 0,
+    .create = 0,
+    .unlink = 0,
+};
+
 void devfs_init(void) {
     vfs_node_t* root = vfs_root();
     if (!root) return;
@@ -76,6 +119,18 @@ void devfs_init(void) {
 
     if (!vfs_find_child(dev_dir, "disk")) {
         vfs_node_t* node = vfs_create_node("disk", VFS_NODE_DEV, &dev_disk_ops, 0);
+        if (!node) return;
+        vfs_add_child(dev_dir, node);
+    }
+
+    if (!vfs_find_child(dev_dir, "kbd")) {
+        vfs_node_t* node = vfs_create_node("kbd", VFS_NODE_DEV, &dev_kbd_ops, 0);
+        if (!node) return;
+        vfs_add_child(dev_dir, node);
+    }
+
+    if (!vfs_find_child(dev_dir, "mouse")) {
+        vfs_node_t* node = vfs_create_node("mouse", VFS_NODE_DEV, &dev_mouse_ops, 0);
         if (!node) return;
         vfs_add_child(dev_dir, node);
     }

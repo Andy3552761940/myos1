@@ -12,6 +12,9 @@ static uint8_t vga_color = 0x0F; /* white on black */
 
 static int serial_inited = 0;
 
+static console_fb_info_t fb_info;
+static int fb_enabled = 0;
+
 static void serial_init(void) {
     /* COM1 base 0x3F8 */
     outb(0x3F8 + 1, 0x00);    // Disable all interrupts
@@ -78,6 +81,23 @@ void console_init(void) {
     console_write("TinyOS64 booting...\n");
 }
 
+void console_set_color(uint8_t fg, uint8_t bg) {
+    vga_color = (uint8_t)((bg << 4) | (fg & 0x0F));
+}
+
+uint8_t console_get_color(void) {
+    return vga_color;
+}
+
+void console_set_framebuffer(const console_fb_info_t* info) {
+    if (!info || !info->base || info->width == 0 || info->height == 0) {
+        fb_enabled = 0;
+        return;
+    }
+    fb_info = *info;
+    fb_enabled = 1;
+}
+
 void console_putc(char c) {
     serial_putc(c);
 
@@ -135,4 +155,36 @@ void console_write_dec_u64(uint64_t v) {
 
 void console_write_dec_u32(uint32_t v) {
     console_write_dec_u64((uint64_t)v);
+}
+
+void console_draw_pixel(uint32_t x, uint32_t y, uint32_t rgb) {
+    if (!fb_enabled) return;
+    if (x >= fb_info.width || y >= fb_info.height) return;
+
+    uint8_t* base = (uint8_t*)fb_info.base + fb_info.pitch * y;
+    if (fb_info.bpp == 32) {
+        uint32_t* p = (uint32_t*)(base + x * 4u);
+        *p = rgb;
+    } else if (fb_info.bpp == 24) {
+        uint8_t* p = base + x * 3u;
+        p[0] = (uint8_t)(rgb & 0xFF);
+        p[1] = (uint8_t)((rgb >> 8) & 0xFF);
+        p[2] = (uint8_t)((rgb >> 16) & 0xFF);
+    } else if (fb_info.bpp == 16) {
+        uint16_t r = (uint16_t)((rgb >> 19) & 0x1F);
+        uint16_t g = (uint16_t)((rgb >> 10) & 0x3F);
+        uint16_t b = (uint16_t)((rgb >> 3) & 0x1F);
+        uint16_t color = (uint16_t)((r << 11) | (g << 5) | b);
+        uint16_t* p = (uint16_t*)(base + x * 2u);
+        *p = color;
+    }
+}
+
+void console_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t rgb) {
+    if (!fb_enabled) return;
+    for (uint32_t yy = 0; yy < h; yy++) {
+        for (uint32_t xx = 0; xx < w; xx++) {
+            console_draw_pixel(x + xx, y + yy, rgb);
+        }
+    }
 }

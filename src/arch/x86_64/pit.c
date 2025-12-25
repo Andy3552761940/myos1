@@ -6,9 +6,11 @@
 #define PIT_BASE_HZ  1193182
 
 static volatile uint64_t g_ticks = 0;
+static volatile uint32_t g_hz = 100;
 
 void pit_init(uint32_t hz) {
     if (hz == 0) hz = 100;
+    g_hz = hz;
 
     uint32_t divisor = PIT_BASE_HZ / hz;
     if (divisor == 0) divisor = 1;
@@ -28,4 +30,8 @@ void pit_handle_irq0(void) {
 
 uint64_t pit_ticks(void) {
     return g_ticks;
+}
+
+uint32_t pit_frequency_hz(void) {
+    return g_hz;
 }

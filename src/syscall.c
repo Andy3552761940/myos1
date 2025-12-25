@@ -9,6 +9,9 @@
 #include "kmalloc.h"
 #include "elf.h"
 #include "arch/x86_64/common.h"
+#include "arch/x86_64/pit.h"
+#include "time.h"
+#include "net.h"
 
 #define USTACK_PAGES  4
 
@@ -139,6 +142,78 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             } else {
                 frame->rax = t->brk_end;
             }
+            return frame;
+        }
+        case SYS_gettimeofday: {
+            time_val_t* tv = (time_val_t*)(uintptr_t)frame->rdi;
+            if (!tv) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+            time_gettimeofday(tv);
+            frame->rax = 0;
+            return frame;
+        }
+        case SYS_sleep: {
+            uint64_t ms = frame->rdi;
+            uint32_t hz = pit_frequency_hz();
+            if (hz == 0) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+            uint64_t ticks = (ms * hz + 999) / 1000;
+            scheduler_sleep(ticks);
+            frame->rax = 0;
+            return frame;
+        }
+        case SYS_socket: {
+            int domain = (int)frame->rdi;
+            int type = (int)frame->rsi;
+            frame->rax = (uint64_t)net_socket(domain, type);
+            return frame;
+        }
+        case SYS_bind: {
+            int fd = (int)frame->rdi;
+            const net_sockaddr_in_t* addr = (const net_sockaddr_in_t*)(uintptr_t)frame->rsi;
+            frame->rax = (uint64_t)net_bind(fd, addr);
+            return frame;
+        }
+        case SYS_sendto: {
+            int fd = (int)frame->rdi;
+            const void* buf = (const void*)(uintptr_t)frame->rsi;
+            size_t len = (size_t)frame->rdx;
+            const net_sockaddr_in_t* addr = (const net_sockaddr_in_t*)(uintptr_t)frame->r10;
+            frame->rax = (uint64_t)net_sendto(fd, buf, len, addr);
+            return frame;
+        }
+        case SYS_recvfrom: {
+            int fd = (int)frame->rdi;
+            void* buf = (void*)(uintptr_t)frame->rsi;
+            size_t len = (size_t)frame->rdx;
+            net_sockaddr_in_t* addr = (net_sockaddr_in_t*)(uintptr_t)frame->r10;
+            frame->rax = (uint64_t)net_recvfrom(fd, buf, len, addr);
+            return frame;
+        }
+        case SYS_connect: {
+            int fd = (int)frame->rdi;
+            const net_sockaddr_in_t* addr = (const net_sockaddr_in_t*)(uintptr_t)frame->rsi;
+            frame->rax = (uint64_t)net_connect(fd, addr);
+            return frame;
+        }
+        case SYS_listen: {
+            int fd = (int)frame->rdi;
+            frame->rax = (uint64_t)net_listen(fd);
+            return frame;
+        }
+        case SYS_accept: {
+            int fd = (int)frame->rdi;
+            net_sockaddr_in_t* addr = (net_sockaddr_in_t*)(uintptr_t)frame->rsi;
+            frame->rax = (uint64_t)net_accept(fd, addr);
+            return frame;
+        }
+        case SYS_close: {
+            int fd = (int)frame->rdi;
+            frame->rax = (uint64_t)net_close(fd);
             return frame;
         }
         default:

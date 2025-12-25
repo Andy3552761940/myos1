@@ -36,15 +36,20 @@ KERNEL_SRCS := \
     src/pmm.c \
     src/vmm.c \
     src/kmalloc.c \
-	src/vfs.c \
+    src/vfs.c \
     src/memfs.c \
     src/devfs.c \
+    src/input.c \
     src/tarfs.c \
     src/elf.c \
     src/pci.c \
+    src/net.c \
     src/virtio_blk.c \
     src/syscall.c \
     src/scheduler.c \
+    src/rtc.c \
+    src/time.c \
+    src/hpet.c \
     src/arch/x86_64/gdt.c \
     src/arch/x86_64/idt.c \
     src/arch/x86_64/pic.c \
