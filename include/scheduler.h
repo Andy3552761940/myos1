@@ -15,11 +15,17 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_s
 /* Called from timer IRQ handler; returns frame to resume. */
 intr_frame_t* scheduler_on_tick(intr_frame_t* frame);
 
+/* Fork current user thread; returns frame to resume parent/child. */
+intr_frame_t* scheduler_fork(intr_frame_t* frame);
+
 /* Called when a thread exits (syscall or fault). Returns next frame to resume. */
 intr_frame_t* scheduler_on_exit(intr_frame_t* frame, int exit_code);
 
 /* Cooperative yield (invoked by syscall yield). */
 intr_frame_t* scheduler_yield(intr_frame_t* frame);
+
+/* Wait for a child process to exit (invoked by syscall waitpid). */
+intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_ptr);
 
 /* Sleep current thread for n ticks (called from kernel code only). */
 void scheduler_sleep(uint64_t ticks);

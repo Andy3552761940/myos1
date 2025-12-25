@@ -4,6 +4,12 @@
 #include "thread.h"
 #include "lib.h"
 #include "vmm.h"
+#include "pmm.h"
+#include "tarfs.h"
+#include "elf.h"
+#include "arch/x86_64/common.h"
+
+#define USTACK_PAGES  4
 
 intr_frame_t* syscall_handle(intr_frame_t* frame) {
     uint64_t num = frame->rax;
@@ -25,6 +31,64 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
 
             frame->rax = len;
             return frame;
+        }
+        case SYS_fork: {
+            return scheduler_fork(frame);
+        }
+        case SYS_execve: {
+            thread_t* cur = thread_current();
+            if (!cur || !cur->is_user) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+
+            const char* path = (const char*)(uintptr_t)frame->rdi;
+            const uint8_t* data = 0;
+            size_t size = 0;
+            if (!tarfs_find(path, &data, &size)) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+
+            uint64_t new_cr3 = vmm_create_user_space();
+            uint64_t entry = 0;
+            uint64_t brk = 0;
+            if (!new_cr3 || !elf64_load_image(data, size, new_cr3, &entry, &brk)) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+
+            uint64_t stack_phys = pmm_alloc_pages(USTACK_PAGES);
+            if (!stack_phys) {
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+            memset((void*)(uintptr_t)stack_phys, 0, USTACK_PAGES * PAGE_SIZE);
+            uint64_t user_stack_base = USER_STACK_TOP - USTACK_PAGES * PAGE_SIZE;
+            if (!vmm_map_range(new_cr3, user_stack_base, stack_phys, USTACK_PAGES * PAGE_SIZE,
+                               VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER)) {
+                pmm_free_pages(stack_phys, USTACK_PAGES);
+                frame->rax = (uint64_t)-1;
+                return frame;
+            }
+
+            cur->cr3 = new_cr3;
+            cur->ustack = (uint8_t*)(uintptr_t)stack_phys;
+            cur->ustack_size = USTACK_PAGES * PAGE_SIZE;
+            cur->ustack_top = USER_STACK_TOP;
+            cur->brk_start = brk;
+            cur->brk_end = brk;
+
+            write_cr3(new_cr3);
+            frame->rip = entry;
+            frame->rsp = cur->ustack_top;
+            frame->rax = 0;
+            return frame;
+        }
+        case SYS_waitpid: {
+            int pid = (int)frame->rdi;
+            uint64_t status_ptr = frame->rsi;
+            return scheduler_waitpid(frame, pid, status_ptr);
         }
         case SYS_exit: {
             int code = (int)frame->rdi;

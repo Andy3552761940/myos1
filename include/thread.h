@@ -9,6 +9,7 @@ typedef enum {
     THREAD_READY,
     THREAD_RUNNING,
     THREAD_SLEEPING,
+    THREAD_BLOCKED,
     THREAD_ZOMBIE,
 } thread_state_t;
 
@@ -18,6 +19,16 @@ typedef struct thread {
 
     thread_state_t state;
     bool     is_user;
+    int      priority;
+
+    /* Simple parent/child tracking for wait/exit. */
+    struct thread* parent;
+    uint32_t children;
+    int      exit_code;
+
+    /* Waiting information (used when state == THREAD_BLOCKED). */
+    int      wait_target;
+    uint64_t wait_status_ptr;
 
     /* Saved interrupt-frame stack pointer (points to r15 in intr_frame_t). */
     uint64_t rsp;
@@ -37,6 +48,10 @@ typedef struct thread {
     /* User heap (brk). */
     uint64_t brk_start;
     uint64_t brk_end;
+
+    /* Very small and simplistic file table placeholder. */
+    int      open_files[8];
+    size_t   open_file_count;
 
     uint64_t wakeup_tick;
 

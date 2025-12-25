@@ -35,6 +35,18 @@ static inline int64_t sys_brk(void* end) {
     return sys_call1(4, (int64_t)(uintptr_t)end);
 }
 
+static inline int64_t sys_fork(void) {
+    return sys_call1(5, 0);
+}
+
+static inline int64_t sys_execve(const char* path) {
+    return sys_call3(6, (int64_t)(uintptr_t)path, 0, 0);
+}
+
+static inline int64_t sys_waitpid(int64_t pid, int* status) {
+    return sys_call3(7, pid, (int64_t)(uintptr_t)status, 0);
+}
+
 static inline void sys_exit(int64_t code) {
     sys_call1(2, code);
     for (;;) { __asm__ volatile("hlt"); }

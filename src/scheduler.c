@@ -116,6 +116,7 @@ static thread_t* thread_alloc_slot(void) {
         if (g_threads[i].state == THREAD_UNUSED) {
             memset(&g_threads[i], 0, sizeof(thread_t));
             g_threads[i].state = THREAD_READY;
+            g_threads[i].priority = 1;
             g_threads[i].id = g_next_id++;
             return &g_threads[i];
         }
@@ -133,6 +134,7 @@ void scheduler_init(void) {
     t0->id = 0;
     t0->state = THREAD_RUNNING;
     t0->is_user = false;
+    t0->priority = 1;
     t0->cr3 = kspace_cr3;
     strncpy(t0->name, "bootstrap", sizeof(t0->name)-1);
 
@@ -153,18 +155,24 @@ void scheduler_add(thread_t* t) {
 }
 
 static thread_t* pick_next(void) {
-    /* Simple round-robin among READY threads, always keep bootstrap as fallback. */
-    size_t cur_idx = 0;
+    /* Priority-based pick: choose READY thread with highest priority. */
+    thread_t* best = 0;
+    int best_prio = -1;
+
     for (size_t i = 0; i < MAX_THREADS; i++) {
-        if (&g_threads[i] == g_current) { cur_idx = i; break; }
+        thread_t* t = &g_threads[i];
+        if (t->state != THREAD_READY) continue;
+        if (!best || t->priority > best_prio) {
+            best = t;
+            best_prio = t->priority;
+        }
     }
 
-    for (size_t off = 1; off < MAX_THREADS; off++) {
-        size_t idx = (cur_idx + off) % MAX_THREADS;
-        if (g_threads[idx].state == THREAD_READY) return &g_threads[idx];
+    if (best) return best;
+    if (g_current && (g_current->state == THREAD_RUNNING || g_current->state == THREAD_READY)) {
+        return g_current;
     }
-
-    return g_current;
+    return &g_threads[0];
 }
 
 static void wake_sleepers(void) {
@@ -173,6 +181,27 @@ static void wake_sleepers(void) {
         if (g_threads[i].state == THREAD_SLEEPING && now >= g_threads[i].wakeup_tick) {
             g_threads[i].state = THREAD_READY;
         }
+    }
+}
+
+static void thread_release_resources(thread_t* t) {
+    if (!t) return;
+    if (t->kstack) {
+        pmm_free_pages((uint64_t)(uintptr_t)t->kstack, t->kstack_size / PAGE_SIZE);
+        t->kstack = 0;
+    }
+
+    if (t->is_user && t->ustack) {
+        uint64_t base = USER_STACK_TOP - t->ustack_size;
+        for (uint64_t off = 0; off < t->ustack_size; off += PAGE_SIZE) {
+            uint64_t pa = vmm_unmap_page(t->cr3, base + off);
+            if (pa) pmm_free_pages(pa, 1);
+        }
+        t->ustack = 0;
+    }
+
+    if (t->is_user && t->cr3 && t->cr3 != kspace_cr3) {
+        /* Leave CR3 for now; freeing full address space is not implemented. */
     }
 }
 
@@ -209,6 +238,49 @@ intr_frame_t* scheduler_on_tick(intr_frame_t* frame) {
     return do_switch(frame, next);
 }
 
+intr_frame_t* scheduler_fork(intr_frame_t* frame) {
+    thread_t* parent = g_current;
+    if (!parent || !parent->is_user) {
+        frame->rax = (uint64_t)-1;
+        return frame;
+    }
+
+    thread_t* child = thread_alloc_slot();
+    if (!child) {
+        frame->rax = (uint64_t)-1;
+        return frame;
+    }
+
+    child->is_user = true;
+    child->cr3 = parent->cr3;
+    child->priority = parent->priority;
+    child->parent = parent;
+    parent->children++;
+    child->ustack = parent->ustack;
+    child->ustack_size = parent->ustack_size;
+    child->ustack_top = parent->ustack_top;
+    child->brk_start = parent->brk_start;
+    child->brk_end = parent->brk_end;
+
+    child->kstack_size = parent->kstack_size;
+    child->kstack = (uint8_t*)pmm_alloc_pages(child->kstack_size / PAGE_SIZE);
+    if (!child->kstack) {
+        child->state = THREAD_UNUSED;
+        frame->rax = (uint64_t)-1;
+        return frame;
+    }
+
+    uint8_t* top = child->kstack + child->kstack_size;
+    intr_frame_t* child_frame = (intr_frame_t*)(top - sizeof(intr_frame_t));
+    *child_frame = *frame;
+    child_frame->rax = 0;
+    child->rsp = (uint64_t)(uintptr_t)child_frame;
+    child->state = THREAD_READY;
+
+    frame->rax = child->id;
+    return frame;
+}
+
 intr_frame_t* scheduler_yield(intr_frame_t* frame) {
     wake_sleepers();
     thread_t* next = pick_next();
@@ -216,14 +288,29 @@ intr_frame_t* scheduler_yield(intr_frame_t* frame) {
 }
 
 intr_frame_t* scheduler_on_exit(intr_frame_t* frame, int exit_code) {
-    (void)exit_code;
     thread_t* cur = g_current;
     console_write("[sched] thread ");
     console_write_dec_u64(cur->id);
     console_write(" exited\n");
 
     cur->rsp = (uint64_t)(uintptr_t)frame;
+    cur->exit_code = exit_code;
     cur->state = THREAD_ZOMBIE;
+
+    if (cur->parent) {
+        if (cur->parent->children > 0) cur->parent->children--;
+        /* Wake a waiting parent if it waits for us or for any child (pid<=0). */
+        if (cur->parent->state == THREAD_BLOCKED &&
+            (cur->parent->wait_target <= 0 || cur->parent->wait_target == (int)cur->id)) {
+            if (cur->parent->wait_status_ptr) {
+                int* sp = (int*)(uintptr_t)cur->parent->wait_status_ptr;
+                *sp = cur->exit_code;
+            }
+            cur->parent->wait_target = 0;
+            cur->parent->wait_status_ptr = 0;
+            cur->parent->state = THREAD_READY;
+        }
+    }
 
     /* Pick next READY thread; if none, fall back to bootstrap (should be READY/RUNNING). */
     thread_t* next = pick_next();
@@ -248,6 +335,48 @@ void scheduler_sleep(uint64_t ticks) {
     __asm__ volatile ("movq $3, %%rax; int $0x80" : : : "rax", "memory");
 }
 
+static thread_t* find_child(thread_t* parent, int pid, bool require_zombie) {
+    for (size_t i = 0; i < MAX_THREADS; i++) {
+        thread_t* t = &g_threads[i];
+        if (t->state == THREAD_UNUSED) continue;
+        if (t->parent != parent) continue;
+        if (pid > 0 && (int)t->id != pid) continue;
+        if (require_zombie && t->state != THREAD_ZOMBIE) continue;
+        return t;
+    }
+    return 0;
+}
+
+intr_frame_t* scheduler_waitpid(intr_frame_t* frame, int pid, uint64_t status_ptr) {
+    thread_t* cur = g_current;
+    if (!cur) return frame;
+
+    thread_t* zombie = find_child(cur, pid, true);
+    if (zombie) {
+        if (status_ptr) {
+            int* sp = (int*)(uintptr_t)status_ptr;
+            *sp = zombie->exit_code;
+        }
+        thread_release_resources(zombie);
+        zombie->state = THREAD_UNUSED;
+        frame->rax = zombie->id;
+        return frame;
+    }
+
+    /* If there is no matching child at all, return -1. */
+    thread_t* any_child = find_child(cur, pid, false);
+    if (!any_child) {
+        frame->rax = (uint64_t)-1;
+        return frame;
+    }
+
+    /* Block current thread until a matching child exits. */
+    cur->wait_target = pid;
+    cur->wait_status_ptr = status_ptr;
+    cur->state = THREAD_BLOCKED;
+    return scheduler_yield(frame);
+}
+
 void scheduler_dump(void) {
     console_write("[sched] threads:\n");
     for (size_t i = 0; i < MAX_THREADS; i++) {
@@ -262,11 +391,14 @@ void scheduler_dump(void) {
             case THREAD_READY: console_write("READY"); break;
             case THREAD_RUNNING: console_write("RUNNING"); break;
             case THREAD_SLEEPING: console_write("SLEEP"); break;
+            case THREAD_BLOCKED: console_write("BLOCK"); break;
             case THREAD_ZOMBIE: console_write("ZOMBIE"); break;
             default: console_write("UNUSED"); break;
         }
         console_write(" user=");
         console_write_dec_u64(t->is_user ? 1 : 0);
+        console_write(" prio=");
+        console_write_dec_u64((uint64_t)t->priority);
         console_write("\n");
     }
 }
@@ -277,6 +409,8 @@ thread_t* thread_create_kernel(const char* name, void (*fn)(void*), void* arg) {
 
     t->is_user = false;
     t->cr3 = kspace_cr3;
+    t->parent = g_current;
+    if (t->parent) t->parent->children++;
     t->kstack_size = KSTACK_PAGES * PAGE_SIZE;
     t->kstack = (uint8_t*)alloc_pages(KSTACK_PAGES);
     if (!t->kstack) {
@@ -299,6 +433,8 @@ thread_t* thread_create_user(const char* name, uint64_t user_rip, uint64_t brk_s
 
     t->is_user = true;
     t->cr3 = cr3;
+    t->parent = g_current;
+    if (t->parent) t->parent->children++;
     if (!t->cr3) {
         t->state = THREAD_UNUSED;
         return 0;
