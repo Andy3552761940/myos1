@@ -1,0 +1,132 @@
+#include "console.h"
+#include "lib.h"
+#include "multiboot2.h"
+#include "pmm.h"
+#include "tarfs.h"
+#include "elf.h"
+#include "pci.h"
+#include "virtio_blk.h"
+#include "arch/x86_64/gdt.h"
+#include "arch/x86_64/idt.h"
+#include "arch/x86_64/pic.h"
+#include "arch/x86_64/pit.h"
+#include "arch/x86_64/common.h"
+#include "scheduler.h"
+#include "thread.h"
+
+#define MB2_BOOTLOADER_MAGIC 0x36d76289u
+
+extern uint8_t _binary_build_initramfs_tar_start[];
+extern uint8_t _binary_build_initramfs_tar_end[];
+
+static void klogger(void* arg) {
+    (void)arg;
+    for (;;) {
+        scheduler_sleep(100); /* ~1 second at 100Hz */
+        console_write("[klogger] ticks=");
+        console_write_dec_u64(pit_ticks());
+        console_write(" free_mem=");
+        console_write_dec_u64(pmm_free_memory_bytes() / 1024);
+        console_write(" KiB\n");
+    }
+}
+
+static void pci_cb(const pci_dev_t* dev, void* user) {
+    (void)user;
+    if (dev->vendor_id == 0x1AF4) {
+        console_write("[pci] virtio dev ");
+        console_write_hex32(dev->device_id);
+        console_write(" at ");
+        console_write_dec_u64(dev->bus);
+        console_write(":");
+        console_write_dec_u64(dev->slot);
+        console_write(".");
+        console_write_dec_u64(dev->func);
+        console_write("\n");
+
+        virtio_blk_try_init_legacy(dev->bus, dev->slot, dev->func);
+    }
+}
+
+void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
+    console_init();
+
+    console_write("[kernel] mb2_magic=");
+    console_write_hex64(mb2_magic);
+    console_write(" mb2=");
+    console_write_hex64((uint64_t)(uintptr_t)mb2);
+    console_write("\n");
+
+    if ((uint32_t)mb2_magic != MB2_BOOTLOADER_MAGIC) {
+        console_write("[kernel] ERROR: bad multiboot2 magic\n");
+        for (;;) cpu_hlt();
+    }
+
+    /* Memory manager (identity mapped 0..4GiB). */
+    pmm_init(mb2);
+
+    /* CPU tables */
+    gdt_init();
+    idt_init();
+
+    /* PIC/PIT */
+    pic_init();
+    pit_init(100);
+
+    /* Mask all IRQs except PIT (IRQ0). */
+    for (uint8_t i = 0; i < 16; i++) pic_set_mask(i, 1);
+    pic_set_mask(0, 0);
+
+    /* Scheduler */
+    scheduler_init();
+
+    /* Init tarfs initramfs embedded in kernel. */
+    tarfs_init(_binary_build_initramfs_tar_start, _binary_build_initramfs_tar_end);
+
+    /* Load and run init.elf from initramfs in user mode (reserve its memory early). */
+    const uint8_t* init_data = 0;
+    size_t init_size = 0;
+    if (!tarfs_find("init.elf", &init_data, &init_size)) {
+        console_write("[kernel] ERROR: init.elf not found in initramfs\n");
+    } else {
+        uint64_t entry = 0;
+        if (elf64_load_image(init_data, init_size, &entry)) {
+            thread_create_user("init", entry);
+        } else {
+            console_write("[kernel] ERROR: failed to load init.elf\n");
+        }
+    }
+
+    /* Spawn a kernel logger thread. */
+    thread_create_kernel("klogger", klogger, 0);
+
+    /* PCI scan for virtio devices (especially virtio-blk legacy). */
+    pci_enumerate(pci_cb, 0);
+
+    /* Try reading sector 0 if virtio-blk is present. */
+    uint8_t sector0[512];
+    memset(sector0, 0, sizeof(sector0));
+    if (virtio_blk_read_sector(0, sector0)) {
+        console_write("[virtio-blk] sector0[0..31]: ");
+        for (int i = 0; i < 32; i++) {
+            static const char* hex = "0123456789ABCDEF";
+            uint8_t b = sector0[i];
+            console_putc(hex[b >> 4]);
+            console_putc(hex[b & 0xF]);
+            console_putc(' ');
+        }
+        console_write("\n");
+    } else {
+        console_write("[virtio-blk] read sector0 skipped/failed\n");
+    }
+
+    scheduler_dump();
+
+    console_write("[kernel] enabling interrupts\n");
+    cpu_sti();
+
+    console_write("[kernel] idle loop\n");
+    for (;;) {
+        cpu_hlt();
+    }
+}
