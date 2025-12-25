@@ -45,6 +45,7 @@ KERNEL_SRCS := \
     src/pci.c \
     src/net.c \
     src/virtio_blk.c \
+    src/disk.c \
     src/syscall.c \
     src/scheduler.c \
     src/rtc.c \
@@ -54,6 +55,7 @@ KERNEL_SRCS := \
     src/arch/x86_64/idt.c \
     src/arch/x86_64/pic.c \
     src/arch/x86_64/pit.c \
+    src/arch/x86_64/irq.c \
     src/arch/x86_64/interrupts.S \
     src/arch/x86_64/interrupt_dispatch.c
 

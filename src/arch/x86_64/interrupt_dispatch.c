@@ -1,12 +1,12 @@
 #include "arch/x86_64/interrupts.h"
 #include "arch/x86_64/common.h"
+#include "arch/x86_64/irq.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/pit.h"
 #include "console.h"
 #include "scheduler.h"
 #include "thread.h"
 #include "syscall.h"
-#include "input.h"
 
 static const char* exc_name(uint64_t n) {
     switch (n) {
@@ -76,6 +76,21 @@ static void dump_frame(const intr_frame_t* f) {
     }
 }
 
+static int exc_exit_code(uint64_t n) {
+    if (n > 31) return -1;
+    return (int)(128 + n);
+}
+
+static void log_current_thread(void) {
+    thread_t* t = thread_current();
+    if (!t) return;
+    console_write(" thread=");
+    console_write_dec_u64(t->id);
+    console_write(" (");
+    console_write(t->name);
+    console_write(")");
+}
+
 intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
     uint64_t n = frame->int_no;
 
@@ -83,21 +98,23 @@ intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
     if (n >= 32 && n <= 47) {
         uint8_t irq = (uint8_t)(n - 32);
 
+        irq_enter(irq);
         if (irq == 0) {
             pit_handle_irq0();
-        } else if (irq == 1) {
-            input_handle_irq1();
-        } else if (irq == 12) {
-            input_handle_irq12();
+        } else {
+            irq_dispatch(irq, frame);
         }
 
-        /* Always EOI before potentially switching. */
+        cpu_cli();
         pic_send_eoi(irq);
 
         if (irq == 0) {
-            return scheduler_on_tick(frame);
+            intr_frame_t* next = scheduler_on_tick(frame);
+            irq_exit();
+            return next;
         }
 
+        irq_exit();
         return frame;
     }
 
@@ -109,6 +126,7 @@ intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
     /* CPU exception */
     console_write("\n[EXCEPTION] ");
     console_write(exc_name(n));
+    log_current_thread();
     console_write("\n");
 
     if (n == 14) {
@@ -123,16 +141,26 @@ intr_frame_t* interrupt_dispatch(intr_frame_t* frame) {
         console_write_dec_u64((frame->err_code >> 1) & 1);
         console_write(" U=");
         console_write_dec_u64((frame->err_code >> 2) & 1);
+        console_write(" RSVD=");
+        console_write_dec_u64((frame->err_code >> 3) & 1);
+        console_write(" I=");
+        console_write_dec_u64((frame->err_code >> 4) & 1);
         console_write("]");
         console_write("\n");
+    } else if (n == 0) {
+        console_write(" divide-by-zero\n");
+    } else if (n == 6) {
+        console_write(" invalid opcode\n");
     }
 
     dump_frame(frame);
 
     /* If from user mode, kill current thread instead of panicking. */
     if ((frame->cs & 3) == 3) {
-        console_write("[EXCEPTION] killing user thread\n");
-        return scheduler_on_exit(frame, -1);
+        console_write("[EXCEPTION] killing user thread");
+        log_current_thread();
+        console_write("\n");
+        return scheduler_on_exit(frame, exc_exit_code(n));
     }
 
     console_write("[PANIC] kernel exception, halting.\n");

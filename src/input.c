@@ -1,4 +1,5 @@
 #include "input.h"
+#include "arch/x86_64/irq.h"
 #include "io.h"
 #include "lib.h"
 #include "console.h"
@@ -92,15 +93,22 @@ void input_init(void) {
     ps2_write_data(0xF4); /* enable */
     (void)ps2_read_data();
 
+    irq_register_handler(1, input_handle_irq1, "ps2-keyboard");
+    irq_register_handler(12, input_handle_irq12, "ps2-mouse");
+
     console_write("[input] PS/2 keyboard/mouse initialized\n");
 }
 
-void input_handle_irq1(void) {
+void input_handle_irq1(uint8_t irq, intr_frame_t* frame) {
+    (void)irq;
+    (void)frame;
     uint8_t scancode = inb(PS2_DATA);
     queue_key(scancode);
 }
 
-void input_handle_irq12(void) {
+void input_handle_irq12(uint8_t irq, intr_frame_t* frame) {
+    (void)irq;
+    (void)frame;
     static uint8_t packet[3];
     static uint8_t idx = 0;
 

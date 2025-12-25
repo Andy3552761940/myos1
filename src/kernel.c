@@ -14,8 +14,10 @@
 #include "input.h"
 #include "net.h"
 #include "time.h"
+#include "disk.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
+#include "arch/x86_64/irq.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/pit.h"
 #include "arch/x86_64/common.h"
@@ -105,6 +107,7 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
 
     /* PIC/PIT */
     pic_init();
+    irq_init();
     pit_init(100);
     time_init();
 
@@ -112,11 +115,14 @@ void kernel_main(uint64_t mb2_magic, const mb2_info_t* mb2) {
     for (uint8_t i = 0; i < 16; i++) pic_set_mask(i, 1);
     pic_set_mask(0, 0);
     pic_set_mask(1, 0);
+    pic_set_mask(2, 0);
     pic_set_mask(12, 0);
+    pic_set_mask(14, 0);
 
     /* Scheduler */
     scheduler_init();
     input_init();
+    disk_init();
     net_init();
 
     /* Init tarfs initramfs embedded in kernel. */

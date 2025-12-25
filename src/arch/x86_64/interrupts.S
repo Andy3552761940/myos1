@@ -145,11 +145,57 @@ IRQ 13 45
 IRQ 14 46
 IRQ 15 47
 
+/* Generic ISRs for vectors 48-127 and 129-255 */
+.altmacro
+.set i, 48
+.rept 80
+ISR_NOERR %i
+.set i, i+1
+.endr
+.set i, 129
+.rept 127
+ISR_NOERR %i
+.set i, i+1
+.endr
+.noaltmacro
+
 /* Syscall vector 0x80 */
 .global isr128
 isr128:
     pushq $0
     pushq $128
     jmp isr_common_stub
+
+.section .rodata
+.global isr_stub_table
+isr_stub_table:
+    /* 0-31 exceptions */
+.altmacro
+.set i, 0
+.rept 32
+    .quad isr%i
+.set i, i+1
+.endr
+    /* 32-47 IRQs */
+.set i, 0
+.rept 16
+    .quad irq%i
+.set i, i+1
+.endr
+    /* 48-127 generic */
+.set i, 48
+.rept 80
+    .quad isr%i
+.set i, i+1
+.endr
+    /* 128 syscall */
+    .quad isr128
+    /* 129-255 generic */
+.set i, 129
+.rept 127
+    .quad isr%i
+.set i, i+1
+.endr
+.noaltmacro
 
 .section .note.GNU-stack,"",@progbits

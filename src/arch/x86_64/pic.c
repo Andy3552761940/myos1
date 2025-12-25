@@ -16,6 +16,17 @@ void pic_send_eoi(uint8_t irq) {
     outb(PIC1_CMD, 0x20);
 }
 
+uint16_t pic_get_mask(void) {
+    uint8_t master = inb(PIC1_DATA);
+    uint8_t slave = inb(PIC2_DATA);
+    return (uint16_t)(master | ((uint16_t)slave << 8));
+}
+
+void pic_set_mask_all(uint16_t mask) {
+    outb(PIC1_DATA, (uint8_t)(mask & 0xFF));
+    outb(PIC2_DATA, (uint8_t)((mask >> 8) & 0xFF));
+}
+
 void pic_set_mask(uint8_t irq_line, int masked) {
     uint16_t port;
     uint8_t value;
