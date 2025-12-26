@@ -18,6 +18,7 @@ static size_t key_tail = 0;
 static mouse_event_t mouse_queue[MOUSE_QUEUE_SIZE];
 static size_t mouse_head = 0;
 static size_t mouse_tail = 0;
+static uint8_t mouse_packet_size = 3;
 
 static int ps2_wait_read(void) {
     for (uint32_t i = 0; i < 100000; i++) {
@@ -56,13 +57,34 @@ static void queue_key(uint8_t scancode) {
     key_head = next;
 }
 
-static void queue_mouse(int8_t dx, int8_t dy, uint8_t buttons) {
+static void queue_mouse(int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons) {
     size_t next = (mouse_head + 1) % MOUSE_QUEUE_SIZE;
     if (next == mouse_tail) return;
     mouse_queue[mouse_head].dx = dx;
     mouse_queue[mouse_head].dy = dy;
+    mouse_queue[mouse_head].wheel = wheel;
     mouse_queue[mouse_head].buttons = buttons;
     mouse_head = next;
+}
+
+static void ps2_mouse_cmd(uint8_t cmd) {
+    ps2_write_cmd(0xD4);
+    ps2_write_data(cmd);
+    (void)ps2_read_data();
+}
+
+static void ps2_mouse_set_sample_rate(uint8_t rate) {
+    ps2_mouse_cmd(0xF3);
+    ps2_mouse_cmd(rate);
+}
+
+static void ps2_mouse_enable_wheel(void) {
+    ps2_mouse_set_sample_rate(200);
+    ps2_mouse_set_sample_rate(100);
+    ps2_mouse_set_sample_rate(80);
+    ps2_mouse_cmd(0xF2); /* Get device ID */
+    uint8_t id = ps2_read_data();
+    mouse_packet_size = (id == 3) ? 4 : 3;
 }
 
 void input_init(void) {
@@ -86,12 +108,9 @@ void input_init(void) {
     ps2_write_cmd(0xA8);
 
     /* Enable mouse streaming */
-    ps2_write_cmd(0xD4);
-    ps2_write_data(0xF6); /* defaults */
-    (void)ps2_read_data();
-    ps2_write_cmd(0xD4);
-    ps2_write_data(0xF4); /* enable */
-    (void)ps2_read_data();
+    ps2_mouse_cmd(0xF6); /* defaults */
+    ps2_mouse_enable_wheel();
+    ps2_mouse_cmd(0xF4); /* enable */
 
     irq_register_handler(1, input_handle_irq1, "ps2-keyboard");
     irq_register_handler(12, input_handle_irq12, "ps2-mouse");
@@ -109,7 +128,7 @@ void input_handle_irq1(uint8_t irq, intr_frame_t* frame) {
 void input_handle_irq12(uint8_t irq, intr_frame_t* frame) {
     (void)irq;
     (void)frame;
-    static uint8_t packet[3];
+    static uint8_t packet[4];
     static uint8_t idx = 0;
 
     uint8_t status = inb(PS2_STATUS);
@@ -122,14 +141,25 @@ void input_handle_irq12(uint8_t irq, intr_frame_t* frame) {
     }
 
     packet[idx++] = data;
-    if (idx < 3) return;
+    if (idx < mouse_packet_size) return;
     idx = 0;
 
     uint8_t buttons = packet[0] & 0x07;
     int8_t dx = (int8_t)packet[1];
     int8_t dy = (int8_t)packet[2];
+    int8_t wheel = 0;
+    if (mouse_packet_size == 4) {
+        wheel = (int8_t)packet[3];
+    }
 
-    queue_mouse(dx, dy, buttons);
+    if (wheel != 0) {
+        int lines = wheel > 0 ? wheel : -wheel;
+        if (lines < 1) lines = 1;
+        lines *= 3;
+        console_scroll_view(wheel > 0 ? lines : -lines);
+    }
+
+    queue_mouse(dx, dy, wheel, buttons);
 }
 
 int input_read_key(key_event_t* out) {

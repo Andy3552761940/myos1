@@ -11,6 +11,7 @@ typedef struct {
 typedef struct {
     int8_t dx;
     int8_t dy;
+    int8_t wheel;
     uint8_t buttons;
 } mouse_event_t;
 
