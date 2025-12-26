@@ -31,6 +31,7 @@ typedef struct {
 
 static mount_entry_t g_mounts[MAX_MOUNTS];
 static uint32_t g_uuid_seed = 0x1234abcd;
+static int g_network_manager_running = 0;
 
 static void str_copy(char* dst, size_t dst_size, const char* src) {
     if (!dst || dst_size == 0) return;
@@ -194,6 +195,21 @@ static int hex_value(char c) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
+}
+
+static int parse_port(const char* s, uint16_t* out) {
+    if (!s || !out) return 0;
+    if (!is_digit(*s)) return 0;
+    uint32_t value = 0;
+    while (*s) {
+        if (!is_digit(*s)) return 0;
+        value = value * 10u + (uint32_t)(*s - '0');
+        if (value > 65535u) return 0;
+        s++;
+    }
+    if (value == 0) return 0;
+    *out = (uint16_t)value;
+    return 1;
 }
 
 static int parse_mac(const char* s, uint8_t out[6]) {
@@ -618,6 +634,95 @@ static void cmd_ip_route_show(void) {
             print_ipv4(route.gateway);
         }
         printf("\n");
+    }
+}
+
+static int find_interface_by_name(const char* name, net_ifinfo_t* out) {
+    if (!name) return 0;
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (!info.present) continue;
+        if (strcmp(info.name, name) == 0) {
+            if (out) *out = info;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int set_all_interfaces_up(int up) {
+    int updated = 0;
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (!info.present) continue;
+        net_ifreq_t req;
+        memset(&req, 0, sizeof(req));
+        str_copy(req.name, sizeof(req.name), info.name);
+        req.up = up ? 1 : 0;
+        req.flags = NET_IF_SET_UP;
+        if (sys_netif_set(&req) >= 0) {
+            updated++;
+        }
+    }
+    return updated;
+}
+
+static void cmd_tcpdump(const char* ifname, const char* port_str) {
+    if (!ifname || !port_str) {
+        puts("tcpdump: usage: tcpdump -i <ifname> port <port>");
+        return;
+    }
+    uint16_t port = 0;
+    if (!parse_port(port_str, &port)) {
+        puts("tcpdump: invalid port");
+        return;
+    }
+    net_ifinfo_t info;
+    if (!find_interface_by_name(ifname, &info)) {
+        printf("tcpdump: unknown interface %s\n", ifname);
+        return;
+    }
+    printf("tcpdump: listening on %s, link-type EN10MB (simulated), capture size 65535 bytes\n", ifname);
+    printf("tcpdump: filter: port %u\n", (unsigned int)port);
+    printf("tcpdump: interface %s is %s, address ", ifname, info.up ? "UP" : "DOWN");
+    print_ipv4(info.addr);
+    printf(", netmask ");
+    print_ipv4(info.netmask);
+    printf(", mac ");
+    print_mac(info.mac);
+    printf("\n");
+    puts("tcpdump: (simulated) no packets captured");
+}
+
+static void cmd_systemctl(const char* action, const char* service) {
+    if (!action || !service) {
+        puts("systemctl: usage: systemctl start|stop NetworkManager");
+        return;
+    }
+    if (strcmp(service, "NetworkManager") != 0) {
+        printf("systemctl: unknown service %s\n", service);
+        return;
+    }
+    if (strcmp(action, "start") == 0) {
+        if (g_network_manager_running) {
+            puts("systemctl: NetworkManager already running");
+            return;
+        }
+        int updated = set_all_interfaces_up(1);
+        g_network_manager_running = 1;
+        printf("systemctl: Started NetworkManager (interfaces up: %d)\n", updated);
+    } else if (strcmp(action, "stop") == 0) {
+        if (!g_network_manager_running) {
+            puts("systemctl: NetworkManager already stopped");
+            return;
+        }
+        int updated = set_all_interfaces_up(0);
+        g_network_manager_running = 0;
+        printf("systemctl: Stopped NetworkManager (interfaces down: %d)\n", updated);
+    } else {
+        puts("systemctl: usage: systemctl start|stop NetworkManager");
     }
 }
 
@@ -1289,7 +1394,7 @@ int main(void) {
         if (argc == 0) continue;
 
         if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath nslookup dig netstat ss");
+            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath nslookup dig netstat ss tcpdump systemctl");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
@@ -1391,6 +1496,31 @@ int main(void) {
             cmd_netstat(argc, argv);
         } else if (strcmp(argv[0], "ss") == 0) {
             cmd_ss(argc, argv);
+        } else if (strcmp(argv[0], "tcpdump") == 0) {
+            const char* ifname = 0;
+            const char* port = 0;
+            for (int i = 1; i < argc; i++) {
+                if (strcmp(argv[i], "-i") == 0 && (i + 1) < argc) {
+                    ifname = argv[++i];
+                } else if (strcmp(argv[i], "port") == 0 && (i + 1) < argc) {
+                    port = argv[++i];
+                } else {
+                    puts("tcpdump: usage: tcpdump -i <ifname> port <port>");
+                    ifname = 0;
+                    break;
+                }
+            }
+            if (ifname && port) {
+                cmd_tcpdump(ifname, port);
+            } else if (ifname || port) {
+                puts("tcpdump: usage: tcpdump -i <ifname> port <port>");
+            }
+        } else if (strcmp(argv[0], "systemctl") == 0) {
+            if (argc >= 3) {
+                cmd_systemctl(argv[1], argv[2]);
+            } else {
+                puts("systemctl: usage: systemctl start|stop NetworkManager");
+            }
         } else if (strcmp(argv[0], "exit") == 0) {
             break;
         } else {
