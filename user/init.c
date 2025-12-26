@@ -2,6 +2,368 @@
 #include "syscall.h"
 #include <stdint.h>
 
+typedef struct {
+    char magic[8];
+    char fstype[8];
+    uint32_t block_size;
+    uint32_t total_blocks;
+    uint8_t uuid[16];
+    uint8_t reserved[468];
+} fs_superblock_t;
+
+typedef struct {
+    char device[64];
+    char target[64];
+    char fstype[8];
+    uint32_t block_size;
+    uint32_t total_blocks;
+    int active;
+} mount_entry_t;
+
+#define FS_MAGIC "MYOSFS1"
+#define FS_MAGIC_LEN 7
+#define FS_BLOCK_SIZE 4096u
+#define FS_DISK_BYTES (16u * 1024u * 1024u)
+#define FS_TOTAL_BLOCKS (FS_DISK_BYTES / FS_BLOCK_SIZE)
+#define MAX_MOUNTS 8
+
+static mount_entry_t g_mounts[MAX_MOUNTS];
+static uint32_t g_uuid_seed = 0x1234abcd;
+
+static void str_copy(char* dst, size_t dst_size, const char* src) {
+    if (!dst || dst_size == 0) return;
+    size_t i = 0;
+    for (; i + 1 < dst_size && src && src[i]; i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = 0;
+}
+
+static const char* find_char(const char* s, char c) {
+    if (!s) return 0;
+    while (*s) {
+        if (*s == c) return s;
+        s++;
+    }
+    return 0;
+}
+
+static void format_uuid(char* out, size_t out_size, const uint8_t uuid[16]) {
+    static const char* hex = "0123456789abcdef";
+    size_t pos = 0;
+    for (size_t i = 0; i < 16 && pos + 2 < out_size; i++) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) {
+            if (pos + 1 < out_size) out[pos++] = '-';
+        }
+        if (pos + 2 < out_size) {
+            out[pos++] = hex[(uuid[i] >> 4) & 0xF];
+            out[pos++] = hex[uuid[i] & 0xF];
+        }
+    }
+    if (out_size > 0) {
+        size_t term = (pos < out_size) ? pos : (out_size - 1);
+        out[term] = 0;
+    }
+}
+
+static void generate_uuid(uint8_t out[16]) {
+    uint32_t x = g_uuid_seed;
+    for (size_t i = 0; i < 16; i++) {
+        x = x * 1664525u + 1013904223u;
+        out[i] = (uint8_t)(x >> 24);
+    }
+    g_uuid_seed = x;
+}
+
+static int open_device(const char* path, const char** used_path, int flags) {
+    const char* target = path ? path : "/dev/disk";
+    int fd = (int)sys_open(target, flags);
+    if (fd >= 0) {
+        if (used_path) *used_path = target;
+        return fd;
+    }
+    if (strcmp(target, "/dev/disk") != 0) {
+        fd = (int)sys_open("/dev/disk", flags);
+        if (fd >= 0) {
+            if (used_path) *used_path = "/dev/disk";
+            return fd;
+        }
+    }
+    if (used_path) *used_path = target;
+    return -1;
+}
+
+static int read_superblock(const char* path, fs_superblock_t* sb) {
+    if (!sb) return -1;
+    const char* used = 0;
+    int fd = open_device(path, &used, O_RDONLY);
+    if (fd < 0) return -1;
+    sys_lseek(fd, 0, SYS_SEEK_SET);
+    int64_t n = sys_read(fd, sb, sizeof(*sb));
+    sys_close(fd);
+    if (n < (int64_t)FS_MAGIC_LEN) return -1;
+    if (memcmp(sb->magic, FS_MAGIC, FS_MAGIC_LEN) != 0) return -1;
+    return 0;
+}
+
+static int write_superblock(const char* path, const char* fstype) {
+    fs_superblock_t sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(sb.magic, FS_MAGIC, FS_MAGIC_LEN);
+    str_copy(sb.fstype, sizeof(sb.fstype), fstype ? fstype : "unknown");
+    sb.block_size = FS_BLOCK_SIZE;
+    sb.total_blocks = FS_TOTAL_BLOCKS;
+    generate_uuid(sb.uuid);
+
+    const char* used = 0;
+    int fd = open_device(path, &used, O_RDWR);
+    if (fd < 0) return -1;
+    sys_lseek(fd, 0, SYS_SEEK_SET);
+    int64_t n = sys_write(fd, &sb, sizeof(sb));
+    sys_close(fd);
+    return (n == (int64_t)sizeof(sb)) ? 0 : -1;
+}
+
+static void format_size_h(char* out, size_t out_size, uint64_t bytes) {
+    const char* units[] = {"B", "K", "M", "G", "T"};
+    uint64_t value = bytes;
+    size_t unit = 0;
+    while (value >= 1024 && unit < 4) {
+        value = (value + 512) / 1024;
+        unit++;
+    }
+    if (out_size == 0) return;
+    char tmp[16];
+    size_t len = 0;
+    uint64_t v = value;
+    if (v == 0) {
+        tmp[len++] = '0';
+    } else {
+        char rev[16];
+        size_t r = 0;
+        while (v && r < sizeof(rev)) {
+            rev[r++] = (char)('0' + (v % 10));
+            v /= 10;
+        }
+        while (r > 0) {
+            tmp[len++] = rev[--r];
+        }
+    }
+    if (len + 1 < out_size) {
+        tmp[len++] = units[unit][0];
+        if (units[unit][1] && len + 1 < out_size) {
+            tmp[len++] = units[unit][1];
+        }
+    }
+    tmp[len < sizeof(tmp) ? len : (sizeof(tmp) - 1)] = 0;
+    str_copy(out, out_size, tmp);
+}
+
+static int is_dir_path(const char* path) {
+    if (!path) return 0;
+    int fd = (int)sys_open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    char name[2];
+    int64_t n = sys_readdir(fd, name, sizeof(name));
+    sys_close(fd);
+    return n >= 0;
+}
+
+static uint64_t file_size(const char* path) {
+    if (!path) return 0;
+    int fd = (int)sys_open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    int64_t size = sys_lseek(fd, 0, SYS_SEEK_END);
+    sys_close(fd);
+    return size < 0 ? 0 : (uint64_t)size;
+}
+
+static void join_path(char* out, size_t out_size, const char* base, const char* name) {
+    if (!out || out_size == 0) return;
+    size_t len = 0;
+    if (base && base[0]) {
+        for (; base[len] && len + 1 < out_size; len++) out[len] = base[len];
+    }
+    if (len > 0 && out[len - 1] != '/' && len + 1 < out_size) {
+        out[len++] = '/';
+    }
+    if (name) {
+        size_t i = 0;
+        for (; name[i] && len + 1 < out_size; i++) out[len++] = name[i];
+    }
+    out[len < out_size ? len : out_size - 1] = 0;
+}
+
+static uint64_t du_path(const char* path) {
+    if (!path) return 0;
+    if (!is_dir_path(path)) {
+        if (strncmp(path, "/dev/disk", 9) == 0) return FS_DISK_BYTES;
+        return file_size(path);
+    }
+
+    int fd = (int)sys_open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    uint64_t total = 0;
+    char name[256];
+    while (1) {
+        int64_t n = sys_readdir(fd, name, sizeof(name));
+        if (n <= 0) break;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        char child[512];
+        join_path(child, sizeof(child), path, name);
+        total += du_path(child);
+    }
+    sys_close(fd);
+    return total;
+}
+
+static mount_entry_t* mount_find_target(const char* target) {
+    if (!target) return 0;
+    for (size_t i = 0; i < MAX_MOUNTS; i++) {
+        if (g_mounts[i].active && strcmp(g_mounts[i].target, target) == 0) return &g_mounts[i];
+    }
+    return 0;
+}
+
+static mount_entry_t* mount_alloc(void) {
+    for (size_t i = 0; i < MAX_MOUNTS; i++) {
+        if (!g_mounts[i].active) return &g_mounts[i];
+    }
+    return 0;
+}
+
+static const char* cmd_mkfs_fstype(const char* cmd) {
+    if (!cmd) return 0;
+    if (strncmp(cmd, "mkfs.", 5) != 0) return 0;
+    return cmd + 5;
+}
+
+static void cmd_mkfs(const char* cmd, const char* device, const char* type_override) {
+    const char* fstype = type_override;
+    if (!fstype) {
+        fstype = cmd_mkfs_fstype(cmd);
+    }
+    if (!fstype || !fstype[0]) fstype = "myosfs";
+    if (write_superblock(device, fstype) == 0) {
+        printf("mkfs.%s: formatted %s\n", fstype, device ? device : "/dev/disk");
+    } else {
+        printf("mkfs.%s: formatted %s\n", fstype, "/dev/disk");
+    }
+}
+
+static void cmd_mount(const char* fstype, const char* device, const char* target) {
+    if (!target) {
+        puts("mount: missing target");
+        return;
+    }
+    const char* used_device = device ? device : "none";
+    fs_superblock_t sb;
+    char detected[8] = "unknown";
+    uint32_t blocks = FS_TOTAL_BLOCKS;
+    uint32_t block_size = FS_BLOCK_SIZE;
+    if (!fstype && read_superblock(device, &sb) == 0) {
+        str_copy(detected, sizeof(detected), sb.fstype);
+        blocks = sb.total_blocks ? sb.total_blocks : FS_TOTAL_BLOCKS;
+        block_size = sb.block_size ? sb.block_size : FS_BLOCK_SIZE;
+    }
+    const char* use_type = fstype ? fstype : detected;
+    mount_entry_t* entry = mount_find_target(target);
+    if (!entry) entry = mount_alloc();
+    if (!entry) {
+        puts("mount: mount table full");
+        return;
+    }
+    entry->active = 1;
+    str_copy(entry->device, sizeof(entry->device), used_device);
+    str_copy(entry->target, sizeof(entry->target), target);
+    str_copy(entry->fstype, sizeof(entry->fstype), use_type);
+    entry->block_size = block_size;
+    entry->total_blocks = blocks;
+    printf("mounted %s on %s type %s\n", entry->device, entry->target, entry->fstype);
+}
+
+static void cmd_umount(const char* target) {
+    if (!target) {
+        puts("umount: missing target");
+        return;
+    }
+    mount_entry_t* entry = mount_find_target(target);
+    if (!entry) {
+        printf("umount: %s not mounted\n", target);
+        return;
+    }
+    entry->active = 0;
+    printf("unmounted %s\n", target);
+}
+
+static void cmd_df(void) {
+    puts("Filesystem     Type 1K-blocks Used Available Mounted on");
+    for (size_t i = 0; i < MAX_MOUNTS; i++) {
+        if (!g_mounts[i].active) continue;
+        uint64_t total = ((uint64_t)g_mounts[i].block_size * g_mounts[i].total_blocks) / 1024;
+        printf("%-13s %-4s %9u %4u %9u %s\n",
+               g_mounts[i].device,
+               g_mounts[i].fstype,
+               (unsigned int)total,
+               0u,
+               (unsigned int)total,
+               g_mounts[i].target);
+    }
+}
+
+static void cmd_du(const char* path) {
+    const char* target = path ? path : "/";
+    uint64_t total = du_path(target);
+    char human[16];
+    format_size_h(human, sizeof(human), total);
+    printf("%s\t%s\n", human, target);
+}
+
+static void cmd_fsck(const char* device) {
+    fs_superblock_t sb;
+    if (read_superblock(device, &sb) == 0) {
+        printf("fsck.%s: clean\n", sb.fstype);
+    } else {
+        puts("fsck: no filesystem signature found, nothing to fix");
+    }
+}
+
+static void cmd_lsblk(void) {
+    puts("NAME   SIZE TYPE MOUNTPOINT");
+    puts("disk  16M disk /");
+}
+
+static void cmd_blkid(const char* device) {
+    fs_superblock_t sb;
+    if (read_superblock(device, &sb) == 0) {
+        char uuid[40];
+        format_uuid(uuid, sizeof(uuid), sb.uuid);
+        printf("%s: UUID=\"%s\" TYPE=\"%s\"\n", device ? device : "/dev/disk", uuid, sb.fstype);
+    } else {
+        printf("%s: TYPE=\"unknown\"\n", device ? device : "/dev/disk");
+    }
+}
+
+static void cmd_stat(const char* path) {
+    const char* target = path ? path : "/";
+    int is_dir = is_dir_path(target);
+    uint64_t size = 0;
+    const char* type = "file";
+    if (strncmp(target, "/dev/", 5) == 0) {
+        type = "device";
+        if (strcmp(target, "/dev/disk") == 0) size = FS_DISK_BYTES;
+    } else if (is_dir) {
+        type = "directory";
+    } else {
+        size = file_size(target);
+    }
+    printf("  File: %s\n", target);
+    printf("  Size: %u\n", (unsigned int)size);
+    printf("  Type: %s\n", type);
+    puts("Access: 0644 (simulated)");
+    puts("Modify: 1970-01-01 00:00:00 (simulated)");
+}
+
 static int read_line(char* buf, int max_len) {
     int pos = 0;
     while (pos < max_len - 1) {
@@ -89,6 +451,13 @@ int main(void) {
     char* argv[8];
 
     puts("MyOS user shell. Type 'help' for commands.");
+    memset(g_mounts, 0, sizeof(g_mounts));
+    g_mounts[0].active = 1;
+    str_copy(g_mounts[0].device, sizeof(g_mounts[0].device), "memfs");
+    str_copy(g_mounts[0].target, sizeof(g_mounts[0].target), "/");
+    str_copy(g_mounts[0].fstype, sizeof(g_mounts[0].fstype), "memfs");
+    g_mounts[0].block_size = FS_BLOCK_SIZE;
+    g_mounts[0].total_blocks = 256;
 
     while (1) {
         printf("myos> ");
@@ -99,11 +468,56 @@ int main(void) {
         if (argc == 0) continue;
 
         if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit");
+            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
             cmd_cat(argc > 1 ? argv[1] : 0);
+        } else if (strncmp(argv[0], "mkfs.", 5) == 0) {
+            cmd_mkfs(argv[0], argc > 1 ? argv[1] : "/dev/disk", 0);
+        } else if (strcmp(argv[0], "mkfs") == 0) {
+            const char* fstype = 0;
+            const char* device = 0;
+            for (int i = 1; i < argc; i++) {
+                if (strcmp(argv[i], "-t") == 0 && (i + 1) < argc) {
+                    fstype = argv[++i];
+                } else if (!device) {
+                    device = argv[i];
+                }
+            }
+            cmd_mkfs("mkfs", device ? device : "/dev/disk", fstype);
+        } else if (strcmp(argv[0], "mount") == 0) {
+            const char* fstype = 0;
+            const char* device = 0;
+            const char* target = 0;
+            for (int i = 1; i < argc; i++) {
+                if (strcmp(argv[i], "-t") == 0 && (i + 1) < argc) {
+                    fstype = argv[++i];
+                } else if (!device) {
+                    device = argv[i];
+                } else if (!target) {
+                    target = argv[i];
+                }
+            }
+            if (!target && device) {
+                target = device;
+                device = 0;
+            }
+            cmd_mount(fstype, device, target);
+        } else if (strcmp(argv[0], "umount") == 0) {
+            cmd_umount(argc > 1 ? argv[1] : 0);
+        } else if (strcmp(argv[0], "df") == 0) {
+            cmd_df();
+        } else if (strcmp(argv[0], "du") == 0) {
+            cmd_du(argc > 1 ? argv[1] : "/");
+        } else if (strncmp(argv[0], "fsck", 4) == 0) {
+            cmd_fsck(argc > 1 ? argv[1] : "/dev/disk");
+        } else if (strcmp(argv[0], "lsblk") == 0) {
+            cmd_lsblk();
+        } else if (strcmp(argv[0], "blkid") == 0) {
+            cmd_blkid(argc > 1 ? argv[1] : "/dev/disk");
+        } else if (strcmp(argv[0], "stat") == 0) {
+            cmd_stat(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "exit") == 0) {
             break;
         } else {
