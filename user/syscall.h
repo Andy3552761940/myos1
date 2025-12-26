@@ -29,6 +29,8 @@
 #define SYS_readdir 26
 #define SYS_netif_get 27
 #define SYS_netif_set 28
+#define SYS_route_get 29
+#define SYS_route_add 30
 
 #define SYS_SEEK_SET 0
 #define SYS_SEEK_CUR 1
@@ -151,6 +153,14 @@ static inline int64_t sys_netif_get(int64_t index, void* info) {
 
 static inline int64_t sys_netif_set(const void* req) {
     return sys_call3(SYS_netif_set, (int64_t)(uintptr_t)req, 0, 0);
+}
+
+static inline int64_t sys_route_get(int64_t index, void* route) {
+    return sys_call3(SYS_route_get, index, (int64_t)(uintptr_t)route, 0);
+}
+
+static inline int64_t sys_route_add(const void* route) {
+    return sys_call3(SYS_route_add, (int64_t)(uintptr_t)route, 0, 0);
 }
 
 static inline void sys_exit(int64_t code) {

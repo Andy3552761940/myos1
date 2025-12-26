@@ -560,6 +560,17 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             frame->rax = (uint64_t)net_if_set(req);
             return frame;
         }
+        case SYS_route_get: {
+            size_t index = (size_t)frame->rdi;
+            net_route_t* route = (net_route_t*)(uintptr_t)frame->rsi;
+            frame->rax = (uint64_t)net_route_get(index, route);
+            return frame;
+        }
+        case SYS_route_add: {
+            const net_route_t* route = (const net_route_t*)(uintptr_t)frame->rdi;
+            frame->rax = (uint64_t)net_route_add(route);
+            return frame;
+        }
         default:
             console_write("[syscall] unknown syscall ");
             console_write_dec_u64(num);

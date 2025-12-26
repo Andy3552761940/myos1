@@ -6,6 +6,7 @@
 #define NET_MAX_QUEUE 16
 #define NET_MAX_PAYLOAD 1500
 #define NET_MAX_IFS 2
+#define NET_MAX_ROUTES 8
 
 typedef enum {
     NET_STATE_FREE = 0,
@@ -37,6 +38,8 @@ typedef struct {
 
 static net_socket_t g_sockets[NET_MAX_SOCKETS];
 static net_ifinfo_t g_netifs[NET_MAX_IFS];
+static net_route_t g_routes[NET_MAX_ROUTES];
+static size_t g_route_count;
 
 static int index_from_fd(int fd) {
     return fd - 1;
@@ -96,6 +99,8 @@ static int dequeue_pending(net_socket_t* s) {
 void net_init(void) {
     memset(g_sockets, 0, sizeof(g_sockets));
     memset(g_netifs, 0, sizeof(g_netifs));
+    memset(g_routes, 0, sizeof(g_routes));
+    g_route_count = 0;
     strncpy(g_netifs[0].name, "lo", NET_IF_NAME_MAX);
     g_netifs[0].addr = 0x7F000001u;
     g_netifs[0].netmask = 0xFF000000u;
@@ -113,6 +118,11 @@ void net_init(void) {
     g_netifs[1].mac[5] = 0x56;
     g_netifs[1].up = 1;
     g_netifs[1].present = 1;
+    g_routes[g_route_count++] = (net_route_t){
+        .dest = 0,
+        .netmask = 0,
+        .gateway = 0xC0A80001u
+    };
     console_write("[net] loopback stack initialized\n");
 }
 
@@ -291,4 +301,24 @@ int net_if_set(const net_ifreq_t* req) {
         return 0;
     }
     return -1;
+}
+
+int net_route_get(size_t index, net_route_t* out) {
+    if (!out) return -1;
+    if (index >= g_route_count) return -1;
+    *out = g_routes[index];
+    return 0;
+}
+
+int net_route_add(const net_route_t* route) {
+    if (!route) return -1;
+    for (size_t i = 0; i < g_route_count; i++) {
+        if (g_routes[i].dest == route->dest && g_routes[i].netmask == route->netmask) {
+            g_routes[i].gateway = route->gateway;
+            return 0;
+        }
+    }
+    if (g_route_count >= NET_MAX_ROUTES) return -1;
+    g_routes[g_route_count++] = *route;
+    return 0;
 }

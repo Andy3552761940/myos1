@@ -37,6 +37,12 @@ typedef struct {
     uint32_t flags;
 } net_ifreq_t;
 
+typedef struct {
+    uint32_t dest;
+    uint32_t netmask;
+    uint32_t gateway;
+} net_route_t;
+
 void net_init(void);
 void net_pci_probe(const pci_dev_t* dev);
 
@@ -51,3 +57,6 @@ int net_close(int fd);
 
 int net_if_get(size_t index, net_ifinfo_t* out);
 int net_if_set(const net_ifreq_t* req);
+
+int net_route_get(size_t index, net_route_t* out);
+int net_route_add(const net_route_t* route);

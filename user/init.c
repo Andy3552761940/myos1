@@ -391,6 +391,51 @@ static void cmd_ip_link_set(const char* name, const char* state) {
     }
 }
 
+static void cmd_ip_route_show(void) {
+    for (int idx = 0; ; idx++) {
+        net_route_t route;
+        if (sys_route_get(idx, &route) < 0) break;
+        if (route.dest == 0 && route.netmask == 0) {
+            printf("default via ");
+            print_ipv4(route.gateway);
+            printf("\n");
+            continue;
+        }
+        print_ipv4(route.dest);
+        int prefix = netmask_to_prefix(route.netmask);
+        if (prefix >= 0) {
+            printf("/%d", prefix);
+        } else {
+            printf(" netmask ");
+            print_ipv4(route.netmask);
+        }
+        if (route.gateway != 0) {
+            printf(" via ");
+            print_ipv4(route.gateway);
+        }
+        printf("\n");
+    }
+}
+
+static void cmd_route_add_default(const char* gateway) {
+    if (!gateway) {
+        puts("route add: missing gateway");
+        return;
+    }
+    uint32_t gw = 0;
+    if (!parse_ipv4(gateway, &gw)) {
+        puts("route add: invalid gateway");
+        return;
+    }
+    net_route_t route;
+    route.dest = 0;
+    route.netmask = 0;
+    route.gateway = gw;
+    if (sys_route_add(&route) < 0) {
+        puts("route add: failed to add default gateway");
+    }
+}
+
 static int is_dir_path(const char* path) {
     if (!path) return 0;
     int fd = (int)sys_open(path, O_RDONLY);
@@ -700,7 +745,7 @@ int main(void) {
         if (argc == 0) continue;
 
         if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip");
+            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
@@ -774,8 +819,21 @@ int main(void) {
                 } else {
                     puts("ip link: usage: ip link set <ifname> up|down");
                 }
+            } else if (argc >= 2 && strcmp(argv[1], "route") == 0) {
+                if (argc == 2 || (argc >= 3 && strcmp(argv[2], "show") == 0)) {
+                    cmd_ip_route_show();
+                } else {
+                    puts("ip route: usage: ip route [show]");
+                }
             } else {
-                puts("ip: usage: ip addr|link");
+                puts("ip: usage: ip addr|link|route");
+            }
+        } else if (strcmp(argv[0], "route") == 0) {
+            if (argc == 5 && strcmp(argv[1], "add") == 0 && strcmp(argv[2], "default") == 0 &&
+                strcmp(argv[3], "gw") == 0) {
+                cmd_route_add_default(argv[4]);
+            } else {
+                puts("route: usage: route add default gw <gateway>");
             }
         } else if (strcmp(argv[0], "exit") == 0) {
             break;
