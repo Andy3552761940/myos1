@@ -399,7 +399,53 @@ static int resolve_host(const char* host, uint32_t* out_addr) {
     if (strcmp(host, "gateway") == 0 || strcmp(host, "router") == 0) {
         return find_default_gateway(out_addr);
     }
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (strcmp(info.name, host) == 0) {
+            *out_addr = info.addr;
+            return 1;
+        }
+    }
     return 0;
+}
+
+static int reverse_lookup(uint32_t addr, const char** out_name) {
+    if (!out_name) return 0;
+    if (is_loopback(addr)) {
+        *out_name = "localhost";
+        return 1;
+    }
+    uint32_t gateway = 0;
+    if (find_default_gateway(&gateway) && gateway == addr) {
+        *out_name = "gateway";
+        return 1;
+    }
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (info.addr == addr) {
+            *out_name = info.name;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void format_ipv4_reverse(char* out, size_t out_size, uint32_t addr) {
+    size_t pos = 0;
+    append_uint_dec(out, out_size, &pos, addr & 0xFFu);
+    append_char(out, out_size, &pos, '.');
+    append_uint_dec(out, out_size, &pos, (addr >> 8) & 0xFFu);
+    append_char(out, out_size, &pos, '.');
+    append_uint_dec(out, out_size, &pos, (addr >> 16) & 0xFFu);
+    append_char(out, out_size, &pos, '.');
+    append_uint_dec(out, out_size, &pos, (addr >> 24) & 0xFFu);
+    append_str(out, out_size, &pos, ".in-addr.arpa.");
+    if (out_size > 0) {
+        size_t term = (pos < out_size) ? pos : (out_size - 1);
+        out[term] = 0;
+    }
 }
 
 static uint64_t now_ms(void) {
@@ -674,6 +720,96 @@ static void cmd_traceroute(const char* host) {
     printf(" %d  ", hop++);
     print_ipv4(addr);
     puts("  2 ms");
+}
+
+static void cmd_nslookup(const char* host) {
+    if (!host) {
+        puts("nslookup: usage: nslookup <name>");
+        return;
+    }
+
+    uint32_t server = 0;
+    if (!find_default_gateway(&server)) server = 0x7F000001u;
+    printf("Server: ");
+    print_ipv4(server);
+    puts("");
+    printf("Address: ");
+    print_ipv4(server);
+    puts("");
+
+    uint32_t addr = 0;
+    if (parse_ipv4(host, &addr)) {
+        const char* name = 0;
+        if (!reverse_lookup(addr, &name)) {
+            printf("nslookup: %s: NXDOMAIN\n", host);
+            return;
+        }
+        printf("Name: %s\n", name);
+        printf("Address: ");
+        print_ipv4(addr);
+        puts("");
+        return;
+    }
+
+    if (!resolve_host(host, &addr)) {
+        printf("nslookup: %s: NXDOMAIN\n", host);
+        return;
+    }
+    printf("Name: %s\n", host);
+    printf("Address: ");
+    print_ipv4(addr);
+    puts("");
+}
+
+static void cmd_dig(const char* host) {
+    if (!host) {
+        puts("dig: usage: dig <name>");
+        return;
+    }
+
+    uint32_t server = 0;
+    if (!find_default_gateway(&server)) server = 0x7F000001u;
+    uint64_t start = now_ms();
+
+    uint32_t addr = 0;
+    int is_reverse = parse_ipv4(host, &addr);
+    const char* ptr_name = 0;
+    if (is_reverse && !reverse_lookup(addr, &ptr_name)) {
+        ptr_name = 0;
+    }
+
+    uint64_t end = now_ms();
+    uint32_t elapsed = (end >= start) ? (uint32_t)(end - start) : 0;
+
+    printf("; <<>> MyOS DiG <<>> %s\n", host);
+    puts(";; QUESTION SECTION:");
+    if (is_reverse) {
+        char reverse_name[64];
+        format_ipv4_reverse(reverse_name, sizeof(reverse_name), addr);
+        printf(";%s IN PTR\n", reverse_name);
+    } else {
+        printf(";%s. IN A\n", host);
+    }
+    puts(";; ANSWER SECTION:");
+    if (is_reverse) {
+        if (!ptr_name) {
+            puts(";; (no answer)");
+        } else {
+            char reverse_name[64];
+            format_ipv4_reverse(reverse_name, sizeof(reverse_name), addr);
+            printf("%s 60 IN PTR %s.\n", reverse_name, ptr_name);
+        }
+    } else if (resolve_host(host, &addr)) {
+        printf("%s. 60 IN A ", host);
+        print_ipv4(addr);
+        puts("");
+    } else {
+        puts(";; (no answer)");
+    }
+    printf(";; Query time: %u msec\n", elapsed);
+    printf(";; SERVER: ");
+    print_ipv4(server);
+    puts("#53");
 }
 
 static const char* socket_proto_name(int type) {
@@ -1153,7 +1289,7 @@ int main(void) {
         if (argc == 0) continue;
 
         if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath netstat ss");
+            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath nslookup dig netstat ss");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
@@ -1247,6 +1383,10 @@ int main(void) {
             cmd_ping(argc > 1 ? argv[1] : 0);
         } else if (strcmp(argv[0], "traceroute") == 0 || strcmp(argv[0], "tracepath") == 0) {
             cmd_traceroute(argc > 1 ? argv[1] : 0);
+        } else if (strcmp(argv[0], "nslookup") == 0) {
+            cmd_nslookup(argc > 1 ? argv[1] : 0);
+        } else if (strcmp(argv[0], "dig") == 0) {
+            cmd_dig(argc > 1 ? argv[1] : 0);
         } else if (strcmp(argv[0], "netstat") == 0) {
             cmd_netstat(argc, argv);
         } else if (strcmp(argv[0], "ss") == 0) {
