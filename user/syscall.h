@@ -138,6 +138,14 @@ static inline int64_t sys_sysinfo(void* info) {
     return sys_call1(SYS_sysinfo, (int64_t)(uintptr_t)info);
 }
 
+static inline int64_t sys_gettimeofday(void* tv) {
+    return sys_call1(SYS_gettimeofday, (int64_t)(uintptr_t)tv);
+}
+
+static inline int64_t sys_sleep(uint64_t ms) {
+    return sys_call1(SYS_sleep, (int64_t)ms);
+}
+
 static inline void* sys_mmap(void* addr, uint64_t len, int prot) {
     return (void*)(uintptr_t)sys_call6(SYS_mmap, (int64_t)(uintptr_t)addr,
                                        (int64_t)len, prot, 0, 0, 0);

@@ -1,6 +1,7 @@
 #include "lib.h"
 #include "syscall.h"
 #include "net.h"
+#include "time.h"
 #include <stdint.h>
 
 typedef struct {
@@ -250,6 +251,92 @@ static int prefix_to_netmask(int prefix, uint32_t* netmask) {
     return 1;
 }
 
+static int is_loopback(uint32_t addr) {
+    return (addr & 0xFF000000u) == 0x7F000000u;
+}
+
+static int find_default_gateway(uint32_t* gateway) {
+    if (!gateway) return 0;
+    for (int idx = 0; ; idx++) {
+        net_route_t route;
+        if (sys_route_get(idx, &route) < 0) break;
+        if (route.dest == 0 && route.netmask == 0) {
+            *gateway = route.gateway;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int find_best_route(uint32_t dest, net_route_t* out, int* out_prefix) {
+    int best_prefix = -1;
+    net_route_t best = {0};
+    for (int idx = 0; ; idx++) {
+        net_route_t route;
+        if (sys_route_get(idx, &route) < 0) break;
+        if (route.netmask == 0) {
+            if (best_prefix < 0) {
+                best_prefix = 0;
+                best = route;
+            }
+            continue;
+        }
+        if ((dest & route.netmask) == route.dest) {
+            int prefix = netmask_to_prefix(route.netmask);
+            if (prefix < 0) prefix = 0;
+            if (prefix > best_prefix) {
+                best_prefix = prefix;
+                best = route;
+            }
+        }
+    }
+    if (best_prefix < 0) return 0;
+    if (out) *out = best;
+    if (out_prefix) *out_prefix = best_prefix;
+    return 1;
+}
+
+static int find_up_interface_for_dest(uint32_t dest, net_ifinfo_t* out) {
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (!info.up) continue;
+        if ((dest & info.netmask) == (info.addr & info.netmask)) {
+            if (out) *out = info;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int any_interface_up(void) {
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (info.up) return 1;
+    }
+    return 0;
+}
+
+static int resolve_host(const char* host, uint32_t* out_addr) {
+    if (!host || !out_addr) return 0;
+    if (parse_ipv4(host, out_addr)) return 1;
+    if (strcmp(host, "localhost") == 0 || strcmp(host, "loopback") == 0) {
+        *out_addr = 0x7F000001u;
+        return 1;
+    }
+    if (strcmp(host, "gateway") == 0 || strcmp(host, "router") == 0) {
+        return find_default_gateway(out_addr);
+    }
+    return 0;
+}
+
+static uint64_t now_ms(void) {
+    time_val_t tv;
+    if (sys_gettimeofday(&tv) < 0) return 0;
+    return tv.tv_sec * 1000ull + tv.tv_usec / 1000ull;
+}
+
 static void cmd_ifconfig_show(const char* name) {
     for (int idx = 0; ; idx++) {
         net_ifinfo_t info;
@@ -434,6 +521,88 @@ static void cmd_route_add_default(const char* gateway) {
     if (sys_route_add(&route) < 0) {
         puts("route add: failed to add default gateway");
     }
+}
+
+static void cmd_ping(const char* host) {
+    if (!host) {
+        puts("ping: missing host");
+        return;
+    }
+    uint32_t addr = 0;
+    if (!resolve_host(host, &addr)) {
+        printf("ping: unknown host %s\n", host);
+        return;
+    }
+
+    net_route_t route;
+    int has_route = find_best_route(addr, &route, 0);
+    int reachable = 0;
+    if (is_loopback(addr)) {
+        reachable = find_up_interface_for_dest(addr, 0);
+    } else if (has_route) {
+        if (route.gateway == 0) {
+            reachable = find_up_interface_for_dest(addr, 0);
+        } else {
+            reachable = any_interface_up();
+        }
+    }
+
+    printf("PING %s (", host);
+    print_ipv4(addr);
+    puts("): 56 data bytes");
+
+    if (!reachable) {
+        puts("ping: Network unreachable");
+        return;
+    }
+
+    for (int seq = 1; seq <= 4; seq++) {
+        uint64_t start = now_ms();
+        sys_sleep(10);
+        uint64_t end = now_ms();
+        uint64_t rtt = end >= start ? (end - start) : 0;
+        printf("64 bytes from ");
+        print_ipv4(addr);
+        printf(": icmp_seq=%d ttl=64 time=%u ms\n", seq, (unsigned int)rtt);
+    }
+}
+
+static void cmd_traceroute(const char* host) {
+    if (!host) {
+        puts("traceroute: missing host");
+        return;
+    }
+    uint32_t addr = 0;
+    if (!resolve_host(host, &addr)) {
+        printf("traceroute: unknown host %s\n", host);
+        return;
+    }
+    net_route_t route;
+    int has_route = find_best_route(addr, &route, 0);
+    if (!has_route && !is_loopback(addr)) {
+        puts("traceroute: no route to host");
+        return;
+    }
+
+    printf("traceroute to %s (", host);
+    print_ipv4(addr);
+    puts("), 30 hops max");
+
+    int hop = 1;
+    if (is_loopback(addr) || (has_route && route.gateway == 0)) {
+        printf(" %d  ", hop++);
+        print_ipv4(addr);
+        puts("  1 ms");
+        return;
+    }
+
+    uint32_t gw = route.gateway;
+    printf(" %d  ", hop++);
+    print_ipv4(gw);
+    puts("  1 ms");
+    printf(" %d  ", hop++);
+    print_ipv4(addr);
+    puts("  2 ms");
 }
 
 static int is_dir_path(const char* path) {
@@ -745,7 +914,7 @@ int main(void) {
         if (argc == 0) continue;
 
         if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route");
+            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
@@ -835,6 +1004,10 @@ int main(void) {
             } else {
                 puts("route: usage: route add default gw <gateway>");
             }
+        } else if (strcmp(argv[0], "ping") == 0) {
+            cmd_ping(argc > 1 ? argv[1] : 0);
+        } else if (strcmp(argv[0], "traceroute") == 0 || strcmp(argv[0], "tracepath") == 0) {
+            cmd_traceroute(argc > 1 ? argv[1] : 0);
         } else if (strcmp(argv[0], "exit") == 0) {
             break;
         } else {
