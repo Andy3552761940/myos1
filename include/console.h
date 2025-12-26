@@ -30,3 +30,4 @@ void console_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t 
 
 void console_set_serial_enabled(int enabled);
 int console_get_serial_enabled(void);
+void console_scroll_view(int lines);

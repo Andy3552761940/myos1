@@ -123,6 +123,20 @@ static uint64_t stdin_read_chars(char* buf, uint64_t len) {
             continue;
         }
 
+        if (ev.scancode == 0x49) { /* Page Up */
+            console_scroll_view(25);
+            continue;
+        } else if (ev.scancode == 0x51) { /* Page Down */
+            console_scroll_view(-25);
+            continue;
+        } else if (ev.scancode == 0x48) { /* Arrow Up */
+            console_scroll_view(1);
+            continue;
+        } else if (ev.scancode == 0x50) { /* Arrow Down */
+            console_scroll_view(-1);
+            continue;
+        }
+
         if (ev.scancode == 0x2A || ev.scancode == 0x36) {
             shift = 1;
             continue;
