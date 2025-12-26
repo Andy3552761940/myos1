@@ -1356,6 +1356,19 @@ static void cmd_cat(const char* path) {
     sys_close(fd);
 }
 
+static void cmd_touch(const char* path) {
+    if (!path) {
+        printf("touch: missing file\n");
+        return;
+    }
+    int fd = (int)sys_open(path, O_CREAT | O_WRONLY);
+    if (fd < 0) {
+        printf("touch: cannot create %s\n", path);
+        return;
+    }
+    sys_close(fd);
+}
+
 static void run_external(char* path) {
     int64_t pid = sys_fork();
     if (pid == 0) {
@@ -1391,14 +1404,16 @@ int main(void) {
         if (len == 0) continue;
 
         int argc = split_args(line, argv, 8);
-        if (argc == 0) continue;
+    if (argc == 0) continue;
 
-        if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath nslookup dig netstat ss tcpdump systemctl");
+    if (strcmp(argv[0], "help") == 0) {
+            puts("Built-ins: help ls cat touch exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath nslookup dig netstat ss tcpdump systemctl");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
             cmd_cat(argc > 1 ? argv[1] : 0);
+        } else if (strcmp(argv[0], "touch") == 0) {
+            cmd_touch(argc > 1 ? argv[1] : 0);
         } else if (strncmp(argv[0], "mkfs.", 5) == 0) {
             cmd_mkfs(argv[0], argc > 1 ? argv[1] : "/dev/disk", 0);
         } else if (strcmp(argv[0], "mkfs") == 0) {
