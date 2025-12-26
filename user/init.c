@@ -1296,7 +1296,11 @@ static int read_line(char* buf, int max_len) {
         char c = 0;
         int64_t n = sys_read(0, &c, 1);
         if (n <= 0) continue;
-        if (c == '\n') break;
+        if (c == '\r' || c == '\n') break;
+        if (c == '\b') {
+            if (pos > 0) pos--;
+            continue;
+        }
         buf[pos++] = c;
     }
     buf[pos] = 0;
@@ -1369,6 +1373,39 @@ static void cmd_touch(const char* path) {
     sys_close(fd);
 }
 
+static void cmd_echo(int argc, char* argv[]) {
+    const char* redirect_path = 0;
+    int redirect_idx = -1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], ">") == 0) {
+            if (i + 1 < argc) {
+                redirect_path = argv[i + 1];
+                redirect_idx = i;
+            }
+            break;
+        }
+    }
+
+    int fd = 1;
+    if (redirect_path) {
+        fd = (int)sys_open(redirect_path, O_CREAT | O_WRONLY);
+        if (fd < 0) {
+            printf("echo: cannot create %s\n", redirect_path);
+            return;
+        }
+    }
+
+    int end = redirect_idx >= 0 ? redirect_idx : argc;
+    for (int i = 1; i < end; i++) {
+        sys_write(fd, argv[i], strlen(argv[i]));
+        if (i + 1 < end) sys_write(fd, " ", 1);
+    }
+    sys_write(fd, "\n", 1);
+
+    if (redirect_path) sys_close(fd);
+}
+
 static void run_external(char* path) {
     int64_t pid = sys_fork();
     if (pid == 0) {
@@ -1407,13 +1444,15 @@ int main(void) {
     if (argc == 0) continue;
 
     if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat touch exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath nslookup dig netstat ss tcpdump systemctl");
+            puts("Built-ins: help ls cat touch echo exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath nslookup dig netstat ss tcpdump systemctl");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
             cmd_cat(argc > 1 ? argv[1] : 0);
         } else if (strcmp(argv[0], "touch") == 0) {
             cmd_touch(argc > 1 ? argv[1] : 0);
+        } else if (strcmp(argv[0], "echo") == 0) {
+            cmd_echo(argc, argv);
         } else if (strncmp(argv[0], "mkfs.", 5) == 0) {
             cmd_mkfs(argv[0], argc > 1 ? argv[1] : "/dev/disk", 0);
         } else if (strcmp(argv[0], "mkfs") == 0) {
