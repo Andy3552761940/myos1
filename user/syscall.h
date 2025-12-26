@@ -31,6 +31,7 @@
 #define SYS_netif_set 28
 #define SYS_route_get 29
 #define SYS_route_add 30
+#define SYS_net_socket_get 31
 
 #define SYS_SEEK_SET 0
 #define SYS_SEEK_CUR 1
@@ -169,6 +170,10 @@ static inline int64_t sys_route_get(int64_t index, void* route) {
 
 static inline int64_t sys_route_add(const void* route) {
     return sys_call3(SYS_route_add, (int64_t)(uintptr_t)route, 0, 0);
+}
+
+static inline int64_t sys_net_socket_get(int64_t index, void* info) {
+    return sys_call3(SYS_net_socket_get, index, (int64_t)(uintptr_t)info, 0);
 }
 
 static inline void sys_exit(int64_t code) {

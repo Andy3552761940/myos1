@@ -466,7 +466,9 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
         case SYS_socket: {
             int domain = (int)frame->rdi;
             int type = (int)frame->rsi;
-            frame->rax = (uint64_t)net_socket(domain, type);
+            thread_t* t = thread_current();
+            int owner_pid = t ? (int)t->id : -1;
+            frame->rax = (uint64_t)net_socket(domain, type, owner_pid);
             return frame;
         }
         case SYS_bind: {
@@ -569,6 +571,12 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
         case SYS_route_add: {
             const net_route_t* route = (const net_route_t*)(uintptr_t)frame->rdi;
             frame->rax = (uint64_t)net_route_add(route);
+            return frame;
+        }
+        case SYS_net_socket_get: {
+            size_t index = (size_t)frame->rdi;
+            net_socket_info_t* info = (net_socket_info_t*)(uintptr_t)frame->rsi;
+            frame->rax = (uint64_t)net_socket_get(index, info);
             return frame;
         }
         default:

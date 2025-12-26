@@ -7,6 +7,13 @@
 #define NET_SOCK_STREAM 1
 #define NET_SOCK_DGRAM 2
 
+typedef enum {
+    NET_STATE_FREE = 0,
+    NET_STATE_BOUND,
+    NET_STATE_LISTEN,
+    NET_STATE_CONNECTED
+} net_state_t;
+
 #define NET_IF_NAME_MAX 8
 #define NET_IF_SET_ADDR 0x1
 #define NET_IF_SET_NETMASK 0x2
@@ -43,10 +50,19 @@ typedef struct {
     uint32_t gateway;
 } net_route_t;
 
+typedef struct {
+    int in_use;
+    int type;
+    net_state_t state;
+    net_sockaddr_in_t local;
+    net_sockaddr_in_t remote;
+    int owner_pid;
+} net_socket_info_t;
+
 void net_init(void);
 void net_pci_probe(const pci_dev_t* dev);
 
-int net_socket(int domain, int type);
+int net_socket(int domain, int type, int owner_pid);
 int net_bind(int fd, const net_sockaddr_in_t* addr);
 int net_listen(int fd);
 int net_accept(int fd, net_sockaddr_in_t* addr);
@@ -54,6 +70,7 @@ int net_connect(int fd, const net_sockaddr_in_t* addr);
 int net_sendto(int fd, const void* buf, size_t len, const net_sockaddr_in_t* addr);
 int net_recvfrom(int fd, void* buf, size_t len, net_sockaddr_in_t* addr);
 int net_close(int fd);
+int net_socket_get(size_t index, net_socket_info_t* out);
 
 int net_if_get(size_t index, net_ifinfo_t* out);
 int net_if_set(const net_ifreq_t* req);

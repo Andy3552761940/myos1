@@ -32,6 +32,7 @@
 #define SYS_netif_set 28
 #define SYS_route_get 29
 #define SYS_route_add 30
+#define SYS_net_socket_get 31
 
 #define SYS_SEEK_SET 0
 #define SYS_SEEK_CUR 1

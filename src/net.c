@@ -8,13 +8,6 @@
 #define NET_MAX_IFS 2
 #define NET_MAX_ROUTES 8
 
-typedef enum {
-    NET_STATE_FREE = 0,
-    NET_STATE_BOUND,
-    NET_STATE_LISTEN,
-    NET_STATE_CONNECTED
-} net_state_t;
-
 typedef struct {
     size_t len;
     uint8_t data[NET_MAX_PAYLOAD];
@@ -28,6 +21,7 @@ typedef struct {
     net_sockaddr_in_t local;
     net_sockaddr_in_t remote;
     int peer;
+    int owner_pid;
     net_msg_t queue[NET_MAX_QUEUE];
     size_t q_head;
     size_t q_tail;
@@ -145,7 +139,7 @@ void net_pci_probe(const pci_dev_t* dev) {
     }
 }
 
-int net_socket(int domain, int type) {
+int net_socket(int domain, int type, int owner_pid) {
     if (domain != NET_AF_INET) return -1;
     if (type != NET_SOCK_STREAM && type != NET_SOCK_DGRAM) return -1;
     int fd = alloc_socket();
@@ -154,6 +148,7 @@ int net_socket(int domain, int type) {
     s->type = type;
     s->state = NET_STATE_BOUND;
     s->local.addr = 0x7F000001u;
+    s->owner_pid = owner_pid;
     return fd;
 }
 
@@ -209,6 +204,7 @@ int net_connect(int fd, const net_sockaddr_in_t* addr) {
     server->local = listener->local;
     server->remote = client->local;
     server->peer = index_from_fd(fd);
+    server->owner_pid = listener->owner_pid;
 
     client->remote = *addr;
     client->state = NET_STATE_CONNECTED;
@@ -270,6 +266,19 @@ int net_close(int fd) {
         g_sockets[s->peer].peer = -1;
     }
     memset(s, 0, sizeof(*s));
+    return 0;
+}
+
+int net_socket_get(size_t index, net_socket_info_t* out) {
+    if (!out) return -1;
+    if (index >= NET_MAX_SOCKETS) return -1;
+    net_socket_t* s = &g_sockets[index];
+    out->in_use = s->in_use;
+    out->type = s->type;
+    out->state = s->state;
+    out->local = s->local;
+    out->remote = s->remote;
+    out->owner_pid = s->owner_pid;
     return 0;
 }
 

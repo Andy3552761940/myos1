@@ -222,6 +222,77 @@ static void print_ipv4(uint32_t addr) {
     printf("%u.%u.%u.%u", a, b, c, d);
 }
 
+static void append_char(char* out, size_t out_size, size_t* pos, char c) {
+    if (*pos + 1 < out_size) out[*pos] = c;
+    (*pos)++;
+}
+
+static void append_str(char* out, size_t out_size, size_t* pos, const char* s) {
+    if (!s) return;
+    while (*s) {
+        append_char(out, out_size, pos, *s++);
+    }
+}
+
+static void append_uint_dec(char* out, size_t out_size, size_t* pos, uint32_t value) {
+    char tmp[16];
+    size_t len = 0;
+    if (value == 0) {
+        tmp[len++] = '0';
+    } else {
+        while (value && len < sizeof(tmp)) {
+            tmp[len++] = (char)('0' + (value % 10u));
+            value /= 10u;
+        }
+    }
+    while (len > 0) {
+        append_char(out, out_size, pos, tmp[--len]);
+    }
+}
+
+static void format_ipv4(char* out, size_t out_size, uint32_t addr) {
+    size_t pos = 0;
+    uint32_t parts[4];
+    parts[0] = (addr >> 24) & 0xFFu;
+    parts[1] = (addr >> 16) & 0xFFu;
+    parts[2] = (addr >> 8) & 0xFFu;
+    parts[3] = addr & 0xFFu;
+    append_uint_dec(out, out_size, &pos, parts[0]);
+    append_char(out, out_size, &pos, '.');
+    append_uint_dec(out, out_size, &pos, parts[1]);
+    append_char(out, out_size, &pos, '.');
+    append_uint_dec(out, out_size, &pos, parts[2]);
+    append_char(out, out_size, &pos, '.');
+    append_uint_dec(out, out_size, &pos, parts[3]);
+    if (out_size > 0) {
+        out[pos < out_size ? pos : out_size - 1] = 0;
+    }
+}
+
+static void format_sockaddr(char* out, size_t out_size, const net_sockaddr_in_t* addr) {
+    size_t pos = 0;
+    if (!addr) {
+        if (out_size > 0) out[0] = 0;
+        return;
+    }
+    if (addr->addr == 0) {
+        append_str(out, out_size, &pos, "0.0.0.0");
+    } else {
+        char ip[20];
+        format_ipv4(ip, sizeof(ip), addr->addr);
+        append_str(out, out_size, &pos, ip);
+    }
+    append_char(out, out_size, &pos, ':');
+    if (addr->port == 0) {
+        append_char(out, out_size, &pos, '*');
+    } else {
+        append_uint_dec(out, out_size, &pos, addr->port);
+    }
+    if (out_size > 0) {
+        out[pos < out_size ? pos : out_size - 1] = 0;
+    }
+}
+
 static void print_mac(const uint8_t mac[6]) {
     printf("%02x:%02x:%02x:%02x:%02x:%02x",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -605,6 +676,174 @@ static void cmd_traceroute(const char* host) {
     puts("  2 ms");
 }
 
+static const char* socket_proto_name(int type) {
+    return type == NET_SOCK_STREAM ? "tcp" : "udp";
+}
+
+static const char* socket_state_name(const net_socket_info_t* info) {
+    if (!info) return "UNKNOWN";
+    if (info->type == NET_SOCK_DGRAM) return "UNCONN";
+    switch (info->state) {
+        case NET_STATE_LISTEN:
+            return "LISTEN";
+        case NET_STATE_CONNECTED:
+            return "ESTABLISHED";
+        case NET_STATE_BOUND:
+            return "CLOSE";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static int socket_is_listening(const net_socket_info_t* info) {
+    if (!info) return 0;
+    if (info->type == NET_SOCK_STREAM) return info->state == NET_STATE_LISTEN;
+    return info->state == NET_STATE_BOUND;
+}
+
+typedef enum {
+    SOCKET_VIEW_NETSTAT = 0,
+    SOCKET_VIEW_SS
+} socket_view_t;
+
+static void cmd_socket_list(int show_listen, int show_all, int want_tcp, int want_udp, int show_proc,
+                            socket_view_t view) {
+    if (!want_tcp && !want_udp) {
+        want_tcp = 1;
+        want_udp = 1;
+    }
+    if (!show_listen && !show_all) {
+        show_all = 1;
+    }
+
+    if (view == SOCKET_VIEW_SS) {
+        puts("Netid  State        Local Address:Port     Peer Address:Port      Process");
+    } else {
+        puts("Proto Local Address           Foreign Address         State       PID/Program name");
+    }
+
+    for (int idx = 0; ; idx++) {
+        net_socket_info_t info;
+        if (sys_net_socket_get(idx, &info) < 0) break;
+        if (!info.in_use) continue;
+        if (info.type == NET_SOCK_STREAM && !want_tcp) continue;
+        if (info.type == NET_SOCK_DGRAM && !want_udp) continue;
+        if (show_listen && !socket_is_listening(&info)) continue;
+        if (!show_all && show_listen == 0) continue;
+
+        char local[32];
+        char remote[32];
+        format_sockaddr(local, sizeof(local), &info.local);
+        format_sockaddr(remote, sizeof(remote), &info.remote);
+
+        if (view == SOCKET_VIEW_SS) {
+            printf("%-6s %-12s %-22s %-22s ",
+                   socket_proto_name(info.type),
+                   socket_state_name(&info),
+                   local,
+                   remote);
+            if (show_proc && info.owner_pid >= 0) {
+                printf("pid=%d,cmd=myos\n", info.owner_pid);
+            } else if (show_proc) {
+                puts("-");
+            } else {
+                puts("");
+            }
+        } else {
+            printf("%-5s %-22s %-22s %-11s ",
+                   socket_proto_name(info.type),
+                   local,
+                   remote,
+                   socket_state_name(&info));
+            if (show_proc && info.owner_pid >= 0) {
+                printf("%d/myos\n", info.owner_pid);
+            } else if (show_proc) {
+                puts("-");
+            } else {
+                puts("");
+            }
+        }
+    }
+}
+
+static void cmd_netstat(int argc, char* argv[]) {
+    int want_tcp = 0;
+    int want_udp = 0;
+    int show_listen = 0;
+    int show_all = 0;
+    int show_proc = 0;
+    for (int i = 1; i < argc; i++) {
+        const char* arg = argv[i];
+        if (arg[0] != '-') continue;
+        for (int j = 1; arg[j]; j++) {
+            switch (arg[j]) {
+                case 't': want_tcp = 1; break;
+                case 'u': want_udp = 1; break;
+                case 'l': show_listen = 1; break;
+                case 'a': show_all = 1; break;
+                case 'p': show_proc = 1; break;
+                case 'n': break;
+                default: break;
+            }
+        }
+    }
+    cmd_socket_list(show_listen, show_all, want_tcp, want_udp, show_proc, SOCKET_VIEW_NETSTAT);
+}
+
+static void cmd_ss_summary(void) {
+    int total = 0;
+    int tcp_total = 0;
+    int udp_total = 0;
+    int listen_total = 0;
+    int established_total = 0;
+
+    for (int idx = 0; ; idx++) {
+        net_socket_info_t info;
+        if (sys_net_socket_get(idx, &info) < 0) break;
+        if (!info.in_use) continue;
+        total++;
+        if (info.type == NET_SOCK_STREAM) tcp_total++;
+        if (info.type == NET_SOCK_DGRAM) udp_total++;
+        if (socket_is_listening(&info)) listen_total++;
+        if (info.state == NET_STATE_CONNECTED) established_total++;
+    }
+
+    printf("Total: %d\n", total);
+    printf("TCP: %d (established %d, listen %d)\n", tcp_total, established_total, listen_total);
+    printf("UDP: %d\n", udp_total);
+}
+
+static void cmd_ss(int argc, char* argv[]) {
+    int want_tcp = 0;
+    int want_udp = 0;
+    int show_listen = 0;
+    int show_all = 0;
+    int show_proc = 0;
+    int summary = 0;
+    for (int i = 1; i < argc; i++) {
+        const char* arg = argv[i];
+        if (arg[0] != '-') continue;
+        for (int j = 1; arg[j]; j++) {
+            switch (arg[j]) {
+                case 't': want_tcp = 1; break;
+                case 'u': want_udp = 1; break;
+                case 'l': show_listen = 1; break;
+                case 'a': show_all = 1; break;
+                case 'p': show_proc = 1; break;
+                case 's': summary = 1; break;
+                case 'n': break;
+                default: break;
+            }
+        }
+    }
+
+    if (summary) {
+        cmd_ss_summary();
+        return;
+    }
+    cmd_socket_list(show_listen, show_all, want_tcp, want_udp, show_proc, SOCKET_VIEW_SS);
+}
+
 static int is_dir_path(const char* path) {
     if (!path) return 0;
     int fd = (int)sys_open(path, O_RDONLY);
@@ -914,7 +1153,7 @@ int main(void) {
         if (argc == 0) continue;
 
         if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath");
+            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip route ping traceroute tracepath netstat ss");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
@@ -1008,6 +1247,10 @@ int main(void) {
             cmd_ping(argc > 1 ? argv[1] : 0);
         } else if (strcmp(argv[0], "traceroute") == 0 || strcmp(argv[0], "tracepath") == 0) {
             cmd_traceroute(argc > 1 ? argv[1] : 0);
+        } else if (strcmp(argv[0], "netstat") == 0) {
+            cmd_netstat(argc, argv);
+        } else if (strcmp(argv[0], "ss") == 0) {
+            cmd_ss(argc, argv);
         } else if (strcmp(argv[0], "exit") == 0) {
             break;
         } else {
