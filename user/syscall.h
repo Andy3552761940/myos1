@@ -27,6 +27,8 @@
 #define SYS_mmap 24
 #define SYS_kill 25
 #define SYS_readdir 26
+#define SYS_netif_get 27
+#define SYS_netif_set 28
 
 #define SYS_SEEK_SET 0
 #define SYS_SEEK_CUR 1
@@ -141,6 +143,14 @@ static inline void* sys_mmap(void* addr, uint64_t len, int prot) {
 
 static inline int64_t sys_kill(int64_t pid, int64_t sig) {
     return sys_call3(SYS_kill, pid, sig, 0);
+}
+
+static inline int64_t sys_netif_get(int64_t index, void* info) {
+    return sys_call3(SYS_netif_get, index, (int64_t)(uintptr_t)info, 0);
+}
+
+static inline int64_t sys_netif_set(const void* req) {
+    return sys_call3(SYS_netif_set, (int64_t)(uintptr_t)req, 0, 0);
 }
 
 static inline void sys_exit(int64_t code) {

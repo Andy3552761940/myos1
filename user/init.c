@@ -1,5 +1,6 @@
 #include "lib.h"
 #include "syscall.h"
+#include "net.h"
 #include <stdint.h>
 
 typedef struct {
@@ -157,6 +158,237 @@ static void format_size_h(char* out, size_t out_size, uint64_t bytes) {
     }
     tmp[len < sizeof(tmp) ? len : (sizeof(tmp) - 1)] = 0;
     str_copy(out, out_size, tmp);
+}
+
+static int is_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+static int parse_ipv4(const char* s, uint32_t* out) {
+    if (!s || !out) return 0;
+    uint32_t parts[4] = {0};
+    const char* p = s;
+    for (int i = 0; i < 4; i++) {
+        if (!is_digit(*p)) return 0;
+        uint32_t value = 0;
+        while (is_digit(*p)) {
+            value = value * 10u + (uint32_t)(*p - '0');
+            if (value > 255u) return 0;
+            p++;
+        }
+        parts[i] = value;
+        if (i < 3) {
+            if (*p != '.') return 0;
+            p++;
+        } else if (*p != '\0') {
+            return 0;
+        }
+    }
+    *out = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+    return 1;
+}
+
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int parse_mac(const char* s, uint8_t out[6]) {
+    if (!s || !out) return 0;
+    const char* p = s;
+    for (int i = 0; i < 6; i++) {
+        int hi = hex_value(*p++);
+        int lo = hex_value(*p++);
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = (uint8_t)((hi << 4) | lo);
+        if (i < 5) {
+            if (*p != ':') return 0;
+            p++;
+        } else if (*p != '\0') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void print_ipv4(uint32_t addr) {
+    uint32_t a = (addr >> 24) & 0xFFu;
+    uint32_t b = (addr >> 16) & 0xFFu;
+    uint32_t c = (addr >> 8) & 0xFFu;
+    uint32_t d = addr & 0xFFu;
+    printf("%u.%u.%u.%u", a, b, c, d);
+}
+
+static void print_mac(const uint8_t mac[6]) {
+    printf("%02x:%02x:%02x:%02x:%02x:%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static int netmask_to_prefix(uint32_t netmask) {
+    int prefix = 0;
+    int zero_found = 0;
+    for (int i = 31; i >= 0; i--) {
+        if (netmask & (1u << i)) {
+            if (zero_found) return -1;
+            prefix++;
+        } else {
+            zero_found = 1;
+        }
+    }
+    return prefix;
+}
+
+static int prefix_to_netmask(int prefix, uint32_t* netmask) {
+    if (!netmask || prefix < 0 || prefix > 32) return 0;
+    if (prefix == 0) {
+        *netmask = 0;
+    } else {
+        *netmask = 0xFFFFFFFFu << (32 - prefix);
+    }
+    return 1;
+}
+
+static void cmd_ifconfig_show(const char* name) {
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (name && strcmp(info.name, name) != 0) continue;
+        printf("%s  ", info.name);
+        printf("inet ");
+        print_ipv4(info.addr);
+        printf("  netmask ");
+        print_ipv4(info.netmask);
+        printf("  mac ");
+        print_mac(info.mac);
+        printf("  %s\n", info.up ? "UP" : "DOWN");
+    }
+}
+
+static void cmd_ifconfig_set(const char* name, const char* ip, const char* netmask, const char* mac) {
+    if (!name || !ip || !netmask) {
+        puts("ifconfig: missing arguments");
+        return;
+    }
+    net_ifreq_t req;
+    memset(&req, 0, sizeof(req));
+    str_copy(req.name, sizeof(req.name), name);
+    if (!parse_ipv4(ip, &req.addr)) {
+        puts("ifconfig: invalid IP address");
+        return;
+    }
+    if (!parse_ipv4(netmask, &req.netmask)) {
+        puts("ifconfig: invalid netmask");
+        return;
+    }
+    req.flags |= NET_IF_SET_ADDR | NET_IF_SET_NETMASK;
+    if (mac) {
+        if (!parse_mac(mac, req.mac)) {
+            puts("ifconfig: invalid MAC address");
+            return;
+        }
+        req.flags |= NET_IF_SET_MAC;
+    }
+    if (sys_netif_set(&req) < 0) {
+        puts("ifconfig: failed to configure interface");
+    }
+}
+
+static void cmd_ip_addr_show(const char* name) {
+    for (int idx = 0; ; idx++) {
+        net_ifinfo_t info;
+        if (sys_netif_get(idx, &info) < 0) break;
+        if (name && strcmp(info.name, name) != 0) continue;
+        printf("%d: %s: <%s>\n", idx + 1, info.name, info.up ? "UP" : "DOWN");
+        printf("    link/ether ");
+        print_mac(info.mac);
+        printf("\n");
+        printf("    inet ");
+        print_ipv4(info.addr);
+        int prefix = netmask_to_prefix(info.netmask);
+        if (prefix >= 0) printf("/%d", prefix);
+        printf("\n");
+    }
+}
+
+static void cmd_ip_addr_add(const char* cidr, const char* name) {
+    if (!cidr || !name) {
+        puts("ip addr add: missing arguments");
+        return;
+    }
+    const char* slash = find_char(cidr, '/');
+    if (!slash) {
+        puts("ip addr add: expected CIDR");
+        return;
+    }
+    char addr_str[32];
+    size_t len = (size_t)(slash - cidr);
+    if (len >= sizeof(addr_str)) {
+        puts("ip addr add: invalid CIDR");
+        return;
+    }
+    memcpy(addr_str, cidr, len);
+    addr_str[len] = 0;
+    uint32_t addr = 0;
+    if (!parse_ipv4(addr_str, &addr)) {
+        puts("ip addr add: invalid address");
+        return;
+    }
+    int prefix = 0;
+    const char* p = slash + 1;
+    if (!is_digit(*p)) {
+        puts("ip addr add: invalid prefix");
+        return;
+    }
+    while (is_digit(*p)) {
+        prefix = prefix * 10 + (*p - '0');
+        if (prefix > 32) {
+            puts("ip addr add: invalid prefix");
+            return;
+        }
+        p++;
+    }
+    if (*p != '\0') {
+        puts("ip addr add: invalid prefix");
+        return;
+    }
+    uint32_t netmask = 0;
+    if (!prefix_to_netmask(prefix, &netmask)) {
+        puts("ip addr add: invalid prefix");
+        return;
+    }
+    net_ifreq_t req;
+    memset(&req, 0, sizeof(req));
+    str_copy(req.name, sizeof(req.name), name);
+    req.addr = addr;
+    req.netmask = netmask;
+    req.flags = NET_IF_SET_ADDR | NET_IF_SET_NETMASK;
+    if (sys_netif_set(&req) < 0) {
+        puts("ip addr add: failed to configure interface");
+    }
+}
+
+static void cmd_ip_link_set(const char* name, const char* state) {
+    if (!name || !state) {
+        puts("ip link set: missing arguments");
+        return;
+    }
+    net_ifreq_t req;
+    memset(&req, 0, sizeof(req));
+    str_copy(req.name, sizeof(req.name), name);
+    if (strcmp(state, "up") == 0) {
+        req.up = 1;
+    } else if (strcmp(state, "down") == 0) {
+        req.up = 0;
+    } else {
+        puts("ip link set: expected up or down");
+        return;
+    }
+    req.flags = NET_IF_SET_UP;
+    if (sys_netif_set(&req) < 0) {
+        puts("ip link set: failed to update interface");
+    }
 }
 
 static int is_dir_path(const char* path) {
@@ -468,7 +700,7 @@ int main(void) {
         if (argc == 0) continue;
 
         if (strcmp(argv[0], "help") == 0) {
-            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat");
+            puts("Built-ins: help ls cat exit mkfs mount umount df du fsck lsblk blkid stat ifconfig ip");
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc > 1 ? argv[1] : "/");
         } else if (strcmp(argv[0], "cat") == 0) {
@@ -518,6 +750,33 @@ int main(void) {
             cmd_blkid(argc > 1 ? argv[1] : "/dev/disk");
         } else if (strcmp(argv[0], "stat") == 0) {
             cmd_stat(argc > 1 ? argv[1] : "/");
+        } else if (strcmp(argv[0], "ifconfig") == 0) {
+            if (argc == 1) {
+                cmd_ifconfig_show(0);
+            } else if (argc == 2) {
+                cmd_ifconfig_show(argv[1]);
+            } else {
+                cmd_ifconfig_set(argv[1], argc > 2 ? argv[2] : 0, argc > 3 ? argv[3] : 0,
+                                 argc > 4 ? argv[4] : 0);
+            }
+        } else if (strcmp(argv[0], "ip") == 0) {
+            if (argc >= 2 && strcmp(argv[1], "addr") == 0) {
+                if (argc == 2 || (argc >= 3 && strcmp(argv[2], "show") == 0)) {
+                    cmd_ip_addr_show(argc >= 4 ? argv[3] : 0);
+                } else if (argc >= 6 && strcmp(argv[2], "add") == 0 && strcmp(argv[4], "dev") == 0) {
+                    cmd_ip_addr_add(argv[3], argv[5]);
+                } else {
+                    puts("ip addr: usage: ip addr show [ifname] | ip addr add <addr>/<prefix> dev <ifname>");
+                }
+            } else if (argc >= 2 && strcmp(argv[1], "link") == 0) {
+                if (argc >= 5 && strcmp(argv[2], "set") == 0) {
+                    cmd_ip_link_set(argv[3], argv[4]);
+                } else {
+                    puts("ip link: usage: ip link set <ifname> up|down");
+                }
+            } else {
+                puts("ip: usage: ip addr|link");
+            }
         } else if (strcmp(argv[0], "exit") == 0) {
             break;
         } else {

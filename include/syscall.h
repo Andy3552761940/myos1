@@ -28,6 +28,8 @@
 #define SYS_mmap 24
 #define SYS_kill 25
 #define SYS_readdir 26
+#define SYS_netif_get 27
+#define SYS_netif_set 28
 
 #define SYS_SEEK_SET 0
 #define SYS_SEEK_CUR 1

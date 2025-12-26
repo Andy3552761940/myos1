@@ -5,6 +5,7 @@
 #define NET_MAX_SOCKETS 32
 #define NET_MAX_QUEUE 16
 #define NET_MAX_PAYLOAD 1500
+#define NET_MAX_IFS 2
 
 typedef enum {
     NET_STATE_FREE = 0,
@@ -35,6 +36,7 @@ typedef struct {
 } net_socket_t;
 
 static net_socket_t g_sockets[NET_MAX_SOCKETS];
+static net_ifinfo_t g_netifs[NET_MAX_IFS];
 
 static int index_from_fd(int fd) {
     return fd - 1;
@@ -93,6 +95,24 @@ static int dequeue_pending(net_socket_t* s) {
 
 void net_init(void) {
     memset(g_sockets, 0, sizeof(g_sockets));
+    memset(g_netifs, 0, sizeof(g_netifs));
+    strncpy(g_netifs[0].name, "lo", NET_IF_NAME_MAX);
+    g_netifs[0].addr = 0x7F000001u;
+    g_netifs[0].netmask = 0xFF000000u;
+    g_netifs[0].up = 1;
+    g_netifs[0].present = 1;
+
+    strncpy(g_netifs[1].name, "eth0", NET_IF_NAME_MAX);
+    g_netifs[1].addr = 0xC0A80002u;
+    g_netifs[1].netmask = 0xFFFFFF00u;
+    g_netifs[1].mac[0] = 0x52;
+    g_netifs[1].mac[1] = 0x54;
+    g_netifs[1].mac[2] = 0x00;
+    g_netifs[1].mac[3] = 0x12;
+    g_netifs[1].mac[4] = 0x34;
+    g_netifs[1].mac[5] = 0x56;
+    g_netifs[1].up = 1;
+    g_netifs[1].present = 1;
     console_write("[net] loopback stack initialized\n");
 }
 
@@ -241,4 +261,34 @@ int net_close(int fd) {
     }
     memset(s, 0, sizeof(*s));
     return 0;
+}
+
+int net_if_get(size_t index, net_ifinfo_t* out) {
+    if (!out) return -1;
+    if (index >= NET_MAX_IFS) return -1;
+    if (!g_netifs[index].present) return -1;
+    *out = g_netifs[index];
+    return 0;
+}
+
+int net_if_set(const net_ifreq_t* req) {
+    if (!req) return -1;
+    for (size_t i = 0; i < NET_MAX_IFS; i++) {
+        if (!g_netifs[i].present) continue;
+        if (strncmp(g_netifs[i].name, req->name, NET_IF_NAME_MAX) != 0) continue;
+        if (req->flags & NET_IF_SET_ADDR) {
+            g_netifs[i].addr = req->addr;
+        }
+        if (req->flags & NET_IF_SET_NETMASK) {
+            g_netifs[i].netmask = req->netmask;
+        }
+        if (req->flags & NET_IF_SET_MAC) {
+            memcpy(g_netifs[i].mac, req->mac, sizeof(g_netifs[i].mac));
+        }
+        if (req->flags & NET_IF_SET_UP) {
+            g_netifs[i].up = req->up ? 1 : 0;
+        }
+        return 0;
+    }
+    return -1;
 }

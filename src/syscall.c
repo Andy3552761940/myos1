@@ -549,6 +549,17 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             frame->rax = (uint64_t)name_len;
             return frame;
         }
+        case SYS_netif_get: {
+            size_t index = (size_t)frame->rdi;
+            net_ifinfo_t* info = (net_ifinfo_t*)(uintptr_t)frame->rsi;
+            frame->rax = (uint64_t)net_if_get(index, info);
+            return frame;
+        }
+        case SYS_netif_set: {
+            const net_ifreq_t* req = (const net_ifreq_t*)(uintptr_t)frame->rdi;
+            frame->rax = (uint64_t)net_if_set(req);
+            return frame;
+        }
         default:
             console_write("[syscall] unknown syscall ");
             console_write_dec_u64(num);
