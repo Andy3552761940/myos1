@@ -22,6 +22,8 @@ struct thread;
 void     vmm_init(void);
 uint64_t vmm_kernel_cr3(void);
 uint64_t vmm_create_user_space(void);
+void vmm_retain_user_space(uint64_t cr3);
+void vmm_release_user_space(uint64_t cr3);
 
 bool vmm_map_page(uint64_t cr3, uint64_t virt, uint64_t phys, uint64_t flags);
 bool vmm_map_range(uint64_t cr3, uint64_t virt, uint64_t phys, size_t size, uint64_t flags);

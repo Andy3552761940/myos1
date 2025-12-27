@@ -239,18 +239,13 @@ static void thread_release_resources(thread_t* t) {
         t->kstack = 0;
     }
 
-    if (t->is_user && t->ustack) {
-        uint64_t base = USER_STACK_TOP - t->ustack_size;
-        for (uint64_t off = 0; off < t->ustack_size; off += PAGE_SIZE) {
-            uint64_t pa = vmm_unmap_page(t->cr3, base + off);
-            if (pa) pmm_free_pages(pa, 1);
-        }
-        t->ustack = 0;
-    }
-
     if (t->is_user && t->cr3 && t->cr3 != kspace_cr3) {
-        /* Leave CR3 for now; freeing full address space is not implemented. */
+        vmm_release_user_space(t->cr3);
+        t->cr3 = 0;
     }
+    t->ustack = 0;
+    t->ustack_size = 0;
+    t->ustack_top = 0;
 }
 
 static void thread_mark_zombie(thread_t* t, int exit_code) {
@@ -337,6 +332,7 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
 
     child->is_user = true;
     child->cr3 = parent->cr3;
+    vmm_retain_user_space(child->cr3);
     child->priority = parent->priority;
     child->cpu_id = parent->cpu_id;
     child->parent = parent;
@@ -359,6 +355,7 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
                 }
             }
             child->open_file_count = 0;
+            vmm_release_user_space(child->cr3);
             child->state = THREAD_UNUSED;
             spinlock_unlock(&g_sched_lock);
             frame->rax = (uint64_t)-1;
@@ -372,6 +369,7 @@ intr_frame_t* scheduler_fork(intr_frame_t* frame) {
     child->kstack_size = parent->kstack_size;
     child->kstack = (uint8_t*)pmm_alloc_pages(child->kstack_size / PAGE_SIZE);
     if (!child->kstack) {
+        vmm_release_user_space(child->cr3);
         child->state = THREAD_UNUSED;
         spinlock_unlock(&g_sched_lock);
         frame->rax = (uint64_t)-1;

@@ -236,11 +236,13 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             }
             vfs_close(file);
 
+            uint64_t old_cr3 = cur->cr3;
             uint64_t new_cr3 = vmm_create_user_space();
             uint64_t entry = 0;
             uint64_t brk = 0;
             if (!new_cr3 || !elf64_load_image(data, size, new_cr3, &entry, &brk)) {
                 if (data) kfree(data);
+                if (new_cr3) vmm_release_user_space(new_cr3);
                 frame->rax = (uint64_t)-1;
                 return frame;
             }
@@ -248,6 +250,7 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
 
             uint64_t stack_phys = pmm_alloc_pages(USTACK_PAGES);
             if (!stack_phys) {
+                vmm_release_user_space(new_cr3);
                 frame->rax = (uint64_t)-1;
                 return frame;
             }
@@ -256,6 +259,7 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             if (!vmm_map_range(new_cr3, user_stack_base, stack_phys, USTACK_PAGES * PAGE_SIZE,
                                VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER)) {
                 pmm_free_pages(stack_phys, USTACK_PAGES);
+                vmm_release_user_space(new_cr3);
                 frame->rax = (uint64_t)-1;
                 return frame;
             }
@@ -269,6 +273,7 @@ intr_frame_t* syscall_handle(intr_frame_t* frame) {
             cur->mmap_base = mmap_default_base(brk);
 
             write_cr3(new_cr3);
+            if (old_cr3 && old_cr3 != vmm_kernel_cr3()) vmm_release_user_space(old_cr3);
             frame->rip = entry;
             frame->rsp = cur->ustack_top;
             frame->rax = 0;
