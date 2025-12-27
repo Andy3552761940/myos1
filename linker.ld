@@ -10,11 +10,6 @@ PHDRS
 
 SECTIONS
 {
-    . = 0x7000;
-    .ap_trampoline : ALIGN(16) {
-        *(.ap_trampoline*)
-    } :text
-
     . = 1M;
     _kernel_start = .;
 
@@ -24,6 +19,10 @@ SECTIONS
 
     .text : ALIGN(0x1000) {
         *(.text*)
+    } :text
+
+    .ap_trampoline : ALIGN(16) {
+        *(.ap_trampoline*)
     } :text
 
     .rodata : ALIGN(0x1000) {
